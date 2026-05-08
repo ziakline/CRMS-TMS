@@ -1,0 +1,347 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Project {
+  project_cd      String    @id @db.VarChar(50)
+  project_nm      String    @db.VarChar(200)
+  dept_nm         String    @db.VarChar(100)
+  is_estimate     String    @default("N") @db.Char(1)
+  is_active       String    @default("Y") @db.Char(1)
+  last_sync_dt    DateTime?
+  created_at      DateTime  @default(now())
+  updated_at      DateTime? @updatedAt
+
+  ars             Ar[]
+  aps             Ap[]
+  autoChangeLogs  AutoChangeLog[]
+  manualHistories ManualHistory[]
+  syncLogs        SyncLog[]
+
+  @@map("TB_PROJECT")
+}
+
+model Ar {
+  ar_seq            Int       @id @default(autoincrement())
+  project_cd        String    @db.VarChar(50)
+  source_id         String?   @db.VarChar(50)
+  biz_group_nm      String?   @db.VarChar(100)
+  issue_dt          DateTime? @db.Date
+  client_nm         String?   @db.VarChar(100)
+  item_type         String?   @db.VarChar(50)
+  description       String    @db.VarChar(200)
+  amount            Decimal   @default(0) @db.Decimal(18, 0)
+  inspect_doc       String?   @db.VarChar(50)
+  inspect_detail    String?
+  inspect_title     String?   @db.VarChar(500)
+  inspect_worker    String?   @db.VarChar(200)
+  inspect_body      String?
+  inspect_excel     String?
+  inspect_status    String?   @db.VarChar(100)
+  claim_status      String?   @db.VarChar(20)
+  receive_status    String?   @db.VarChar(20)
+  is_estimate       String    @default("N") @db.Char(1)
+  is_deleted        String    @default("N") @db.Char(1)
+  last_sync_log_seq Int?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime? @updatedAt
+
+  project           Project   @relation(fields: [project_cd], references: [project_cd])
+
+  @@index([project_cd, source_id], map: "IX_TB_AR_PROJECT_SOURCE")
+  @@index([project_cd, source_id, issue_dt], map: "IX_TB_AR_PROJECT_SOURCE_ISSUE")
+  @@map("TB_AR")
+}
+
+model Ap {
+  ap_seq            Int       @id @default(autoincrement())
+  project_cd        String    @db.VarChar(50)
+  source_id         String?   @db.VarChar(50)
+  biz_group_nm      String?   @db.VarChar(100)
+  issue_dt          DateTime? @db.Date
+  client_nm         String?   @db.VarChar(100)
+  item_type         String?   @db.VarChar(50)
+  description       String    @db.VarChar(200)
+  amount            Decimal   @default(0) @db.Decimal(18, 0)
+  inspect_doc       String?   @db.VarChar(50)
+  inspect_detail    String?
+  inspect_title     String?   @db.VarChar(500)
+  inspect_worker    String?   @db.VarChar(200)
+  inspect_body      String?
+  inspect_excel     String?
+  inspect_status    String?   @db.VarChar(100)
+  pay_status        String?   @db.VarChar(20)
+  is_estimate       String    @default("N") @db.Char(1)
+  is_deleted        String    @default("N") @db.Char(1)
+  last_sync_log_seq Int?
+  created_at        DateTime  @default(now())
+  updated_at        DateTime? @updatedAt
+
+  project           Project   @relation(fields: [project_cd], references: [project_cd])
+
+  @@index([project_cd, source_id], map: "IX_TB_AP_PROJECT_SOURCE")
+  @@index([project_cd, source_id, issue_dt], map: "IX_TB_AP_PROJECT_SOURCE_ISSUE")
+  @@map("TB_AP")
+}
+
+model AutoChangeLog {
+  log_seq         Int       @id @default(autoincrement())
+  project_cd      String    @db.VarChar(50)
+  source_id       String?   @db.VarChar(50)
+  issue_dt        DateTime? @db.Date
+  module_type     String    @db.VarChar(10)
+  target_desc     String    @db.VarChar(200)
+  changed_column  String    @db.VarChar(50)
+  before_value    String?   // PostgreSQL text 타입으로 자동 매핑 (NVarChar(Max) 대체)
+  after_value     String?   // PostgreSQL text 타입으로 자동 매핑
+  detected_at     DateTime  @default(now())
+
+  project         Project   @relation(fields: [project_cd], references: [project_cd])
+
+  @@index([project_cd, module_type, source_id, issue_dt], map: "IX_TB_CHANGELOG_MATCH")
+  @@map("TB_AUTO_CHANGE_LOG")
+}
+
+model ManualHistory {
+  history_seq     Int       @id @default(autoincrement())
+  project_cd      String    @db.VarChar(50)
+  change_dt       DateTime  
+  worker_nm       String?   @db.VarChar(50)
+  remarks         String    // PostgreSQL text 타입으로 자동 매핑
+  created_at      DateTime  @default(now())
+
+  project         Project   @relation(fields: [project_cd], references: [project_cd])
+
+  @@map("TB_MANUAL_HISTORY")
+}
+
+model SyncLog {
+  sync_seq        Int       @id @default(autoincrement())
+  project_cd      String?   @db.VarChar(50)
+  start_dt        DateTime  @default(now())
+  end_dt          DateTime? 
+  status          String    @db.VarChar(20)
+  new_history_cnt Int       @default(0)
+  error_msg       String?   // PostgreSQL text 타입으로 자동 매핑
+
+  project         Project?  @relation(fields: [project_cd], references: [project_cd])
+
+  @@map("TB_SYNC_LOG")
+}
+
+model User {
+  user_id         Int       @id @default(autoincrement())
+  email           String    @unique @db.VarChar(255)
+  name            String    @db.VarChar(100)
+  is_approved     Boolean   @default(false)
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  @@map("TB_USER")
+}
+
+// ==========================================
+// [재무관리 - 코드(단가) 관리 마스터]
+// ==========================================
+model FeePolicy {
+  policy_seq      Int       @id @default(autoincrement())
+  bank_cd         String    @db.VarChar(20) // HANA | IM | BUSAN
+  fee_category    String    @db.VarChar(20) // SETUP | OPERATION
+  service_type    String    @db.VarChar(50) // 단독형, 서버형, 연계형, 클라우드형, 공통 등
+  is_sliding      String    @default("N") @db.Char(1) // Y/N
+  standard_price  Decimal   @default(0) @db.Decimal(18, 0) // 기본 단가(슬라이딩이면 참고 단가 또는 0)
+  is_active       String    @default("Y") @db.Char(1) // Y/N
+  priority        Int       @default(100) // 동일 조건 충돌 시 우선순위(낮을수록 우선)
+  note            String?   // 운영 메모
+  created_by      String?   @db.VarChar(100)
+  updated_by      String?   @db.VarChar(100)
+  created_at      DateTime  @default(now())
+  updated_at      DateTime  @updatedAt
+
+  tiers           FeeTier[]
+  promotions      FeePromotion[]
+
+  @@unique([bank_cd, fee_category, service_type], map: "UQ_TB_FEE_POLICY_BANK_CAT_TYPE")
+  @@index([bank_cd, fee_category, is_active], map: "IX_TB_FEE_POLICY_SEARCH")
+  @@map("TB_FEE_POLICY")
+}
+
+model FeeTier {
+  tier_seq         Int       @id @default(autoincrement())
+  policy_seq       Int
+  tier_name        String?   @db.VarChar(50) // 1차, 2차 등 라벨
+  min_count        Int       @default(0)
+  max_count        Int       @default(99999999)
+  tier_price       Decimal   @default(0) @db.Decimal(18, 0)
+  sort_order       Int       @default(0)
+  created_by       String?   @db.VarChar(100)
+  updated_by       String?   @db.VarChar(100)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  policy           FeePolicy @relation(fields: [policy_seq], references: [policy_seq], onDelete: Cascade)
+
+  @@index([policy_seq, sort_order], map: "IX_TB_FEE_TIER_POLICY_SORT")
+  @@index([policy_seq, min_count, max_count], map: "IX_TB_FEE_TIER_RANGE")
+  @@map("TB_FEE_TIER")
+}
+
+model FeePromotion {
+  promo_seq        Int       @id @default(autoincrement())
+  policy_seq       Int
+  promo_name       String    @db.VarChar(100)
+  promo_type       String    @db.VarChar(20) // SETUP_P | OP_P
+  base_year        Int?      // 운영 조회 편의를 위한 기준 연도
+  base_quarter     Int?      // 1~4 (분기 운영 시)
+  start_dt         DateTime? @db.Date
+  end_dt           DateTime? @db.Date
+  is_sliding       String    @default("N") @db.Char(1) // Y/N
+  promo_price      Decimal   @default(0) @db.Decimal(18, 0) // 프로모션 "적용 단가"
+  is_active        String    @default("Y") @db.Char(1)
+  priority         Int       @default(100)
+  note             String?
+  created_by       String?   @db.VarChar(100)
+  updated_by       String?   @db.VarChar(100)
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  policy           FeePolicy      @relation(fields: [policy_seq], references: [policy_seq], onDelete: Cascade)
+  promoTiers       FeePromoTier[]
+
+  @@index([policy_seq, is_active, start_dt, end_dt], map: "IX_TB_FEE_PROMOTION_ACTIVE")
+  @@index([base_year, base_quarter], map: "IX_TB_FEE_PROMOTION_PERIOD_META")
+  @@map("TB_FEE_PROMOTION")
+}
+
+model FeePromoTier {
+  promo_tier_seq   Int          @id @default(autoincrement())
+  promo_seq        Int
+  tier_name        String?      @db.VarChar(50) // 1~30개, 31~100개 등
+  min_count        Int          @default(0)
+  max_count        Int          @default(99999999)
+  tier_price       Decimal      @default(0) @db.Decimal(18, 0) // 프로모션 적용 단가
+  sort_order       Int          @default(0)
+  created_by       String?      @db.VarChar(100)
+  updated_by       String?      @db.VarChar(100)
+  created_at       DateTime     @default(now())
+  updated_at       DateTime     @updatedAt
+
+  promotion        FeePromotion @relation(fields: [promo_seq], references: [promo_seq], onDelete: Cascade)
+
+  @@index([promo_seq, sort_order], map: "IX_TB_FEE_PROMO_TIER_PROMO_SORT")
+  @@index([promo_seq, min_count, max_count], map: "IX_TB_FEE_PROMO_TIER_RANGE")
+  @@map("TB_FEE_PROMO_TIER")
+}
+
+model CrawlTarget {
+  target_seq      Int      @id @default(autoincrement())
+  project_cd      String   @unique @db.VarChar(50)
+  project_name    String?  @db.VarChar(200)
+  biz_sector_nm   String?  @db.VarChar(200)
+  biz_dept_nm     String?  @db.VarChar(200)
+  is_active       String   @default("Y") @db.Char(1)
+  base_year       Int?
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  @@index([is_active, base_year], map: "IX_TB_CRAWL_TARGET_ACTIVE_YEAR")
+  @@map("TB_CRAWL_TARGET")
+}
+
+model OperatingCost {
+  op_seq          Int      @id @default(autoincrement())
+  project_cd      String   @db.VarChar(50)
+  base_year       Int
+  target_month    String   @db.VarChar(7) // YYYY-MM
+  labor_cost      Decimal  @default(0) @db.Decimal(18, 0) // 인건비
+  insurance_cost  Decimal  @default(0) @db.Decimal(18, 0) // 4대보험
+  severance_cost  Decimal  @default(0) @db.Decimal(18, 0) // 퇴직급여
+  dept_op_cost    Decimal  @default(0) @db.Decimal(18, 0) // 부서운영비
+  total_cost      Decimal  @default(0) @db.Decimal(18, 0) // 합계
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  @@unique([project_cd, target_month], map: "UQ_TB_OP_COST_PROJECT_MONTH")
+  @@index([project_cd, base_year], map: "IX_TB_OP_COST_PROJECT_YEAR")
+  @@map("TB_OP_COST")
+}
+
+model PnlMaster {
+  pnl_seq           Int      @id @default(autoincrement())
+  base_year         Int
+  pnl_type          String   @db.VarChar(10) // AR | AP
+
+  row_code          String   @unique @db.VarChar(100)
+  parent_row_code   String?  @db.VarChar(100)
+
+  grade             String?  @db.VarChar(10)
+  category1         String?  @db.VarChar(50)
+  category2         String?  @db.VarChar(50)
+  category3         String?  @db.VarChar(50)
+  biz_detail        String?  @db.VarChar(50)
+  biz_group         String?  @db.VarChar(50)
+  row_label         String?  @db.VarChar(100)
+  client_name       String?  @db.VarChar(100)
+
+  row_type          String   @db.VarChar(20) // INPUT | SUBTOTAL | TOTAL
+  calc_mode         String   @default("AUTO") @db.VarChar(20) // AUTO | MANUAL_OVERRIDE
+  formula_targets   String?  // 계산 대상 row_code 목록(csv)
+  ref_qty_row_code  String?  @db.VarChar(100)
+  ref_unit_price_cd String?  @db.VarChar(100)
+  sort_order        Int      @default(0)
+
+  prev_year_actual  Decimal  @default(0) @db.Decimal(18, 0)
+  company_target    Decimal  @default(0) @db.Decimal(18, 0)
+  base_ratio        Decimal  @default(0) @db.Decimal(5, 2)
+
+  t_m01             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m02             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m03             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m04             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m05             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m06             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m07             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m08             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m09             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m10             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m11             Decimal  @default(0) @db.Decimal(18, 0)
+  t_m12             Decimal  @default(0) @db.Decimal(18, 0)
+
+  a_m01             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m02             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m03             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m04             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m05             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m06             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m07             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m08             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m09             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m10             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m11             Decimal  @default(0) @db.Decimal(18, 0)
+  a_m12             Decimal  @default(0) @db.Decimal(18, 0)
+
+  source_note       String?
+  created_at        DateTime @default(now())
+  updated_at        DateTime @updatedAt
+
+  @@index([base_year, pnl_type], map: "IX_TB_PNL_MASTER_YEAR_TYPE")
+  @@map("TB_PNL_MASTER")
+}
+
+model PnlColumnPreference {
+  pref_seq         Int      @id @default(autoincrement())
+  user_email       String   @db.VarChar(255)
+  view_tab         String   @db.VarChar(20) // goal | actual
+  depth_type       String   @db.VarChar(20) // AR | AP | OP_COST
+  selected_columns String
+  created_at       DateTime @default(now())
+  updated_at       DateTime @updatedAt
+
+  @@unique([user_email, view_tab, depth_type], map: "UQ_TB_PNL_COL_PREF_SCOPE")
+  @@map("TB_PNL_COLUMN_PREF")
+}
