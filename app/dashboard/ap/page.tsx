@@ -151,6 +151,12 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
 
         <section className="space-y-4">
           {groupEntries.map(([groupName, groupRows]) => {
+            const sortedGroupRows = [...groupRows].sort((a, b) => {
+              if (!a.issue_dt && !b.issue_dt) return 0;
+              if (!a.issue_dt) return 1;
+              if (!b.issue_dt) return -1;
+              return new Date(a.issue_dt).getTime() - new Date(b.issue_dt).getTime();
+            });
             const totalAmount = groupRows.reduce((sum, row) => sum + row.amount, 0);
             const statusSummary = groupRows.reduce(
               (acc, row) => {
@@ -192,7 +198,7 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
                 >
                   <div className="flex items-center justify-between gap-4">
                     <span>
-                      {groupName} ({groupRows.length}건) · {totalAmount.toLocaleString("ko-KR")}원
+                      {groupName} ({sortedGroupRows.length}건) · {totalAmount.toLocaleString("ko-KR")}원
                     </span>
                     <span className="text-[11px] text-slate-600">
                       완료 {statusSummary.doneCnt}건/{statusSummary.doneAmount.toLocaleString("ko-KR")}원 | 진행{" "}
@@ -215,7 +221,7 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
                       </tr>
                     </thead>
                     <tbody>
-                      {groupRows.map((row, index) => {
+                      {sortedGroupRows.map((row, index) => {
                         const rowDateKey = row.issue_dt ? row.issue_dt.slice(0, 10) : "";
                         const key = `${row.source_id ?? ""}|${rowDateKey}|${row.target_desc}`;
                         return (
