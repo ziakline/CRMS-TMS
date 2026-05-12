@@ -293,6 +293,8 @@ model PnlMaster {
   formula_targets   String?  // 계산 대상 row_code 목록(csv)
   ref_qty_row_code  String?  @db.VarChar(100)
   ref_unit_price_cd String?  @db.VarChar(100)
+  promo_apply_actual Boolean @default(false)
+  vat_included_price Boolean @default(false)
   sort_order        Int      @default(0)
 
   prev_year_actual  Decimal  @default(0) @db.Decimal(18, 0)

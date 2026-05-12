@@ -18,14 +18,60 @@ export async function GET(request: Request) {
   if (mode === "meta") {
     const viewTab = (searchParams.get("viewTab") || "goal").toLowerCase();
     const depthType = (searchParams.get("depthType") || "AR").toUpperCase();
-    const feePolicies = await prisma.feePolicy.findMany({
-      where: { is_active: "Y" },
-      orderBy: [{ bank_cd: "asc" }, { fee_category: "asc" }, { service_type: "asc" }],
-      select: { policy_seq: true, bank_cd: true, fee_category: true, service_type: true, standard_price: true },
-    });
+    const feeRepo = (prisma as unknown as {
+      feePolicy?: {
+        findMany: Function;
+      };
+    }).feePolicy;
+    const feePolicies = feeRepo
+      ? await feeRepo.findMany({
+          where: { is_active: "Y" },
+          orderBy: [{ bank_cd: "asc" }, { fee_category: "asc" }, { service_type: "asc" }],
+          select: {
+            policy_seq: true,
+            bank_cd: true,
+            fee_category: true,
+            service_type: true,
+            is_sliding: true,
+            standard_price: true,
+            tiers: {
+              select: {
+                min_count: true,
+                max_count: true,
+                tier_price: true,
+                sort_order: true,
+              },
+              orderBy: [{ sort_order: "asc" }, { min_count: "asc" }],
+            },
+            promotions: {
+              where: { is_active: "Y" },
+              select: {
+                promo_seq: true,
+                start_dt: true,
+                end_dt: true,
+                is_sliding: true,
+                promo_price: true,
+                priority: true,
+                promoTiers: {
+                  select: {
+                    min_count: true,
+                    max_count: true,
+                    tier_price: true,
+                    sort_order: true,
+                  },
+                  orderBy: [{ sort_order: "asc" }, { min_count: "asc" }],
+                },
+              },
+              orderBy: [{ priority: "asc" }, { start_dt: "asc" }],
+            },
+          },
+        })
+      : [];
     const prefRepo = (prisma as unknown as { pnlColumnPreference?: { findUnique: Function } }).pnlColumnPreference;
-    const pref = prefRepo
-      ? await prefRepo.findUnique({
+    let pref: { selected_columns?: string } | null = null;
+    if (prefRepo) {
+      try {
+        pref = await prefRepo.findUnique({
           where: {
             user_email_view_tab_depth_type: {
               user_email: session.user.email,
@@ -34,15 +80,54 @@ export async function GET(request: Request) {
             },
           },
           select: { selected_columns: true },
-        })
-      : null;
+        });
+      } catch (error) {
+        const err = error as { code?: string };
+        if (err?.code !== "P2022") {
+          throw error;
+        }
+        // DB 스키마에 컬럼이 아직 반영되지 않은 경우 기본 컬럼으로 fallback
+        pref = null;
+      }
+    }
 
     return Response.json(
       {
         feeOptions: feePolicies.map((item) => ({
           code: `FEE:${item.policy_seq}`,
+          policySeq: item.policy_seq,
+          bankCd: item.bank_cd,
+          feeCategory: item.fee_category,
+          serviceType: item.service_type,
+          isSliding: item.is_sliding,
           label: `${item.bank_cd}/${item.fee_category}/${item.service_type}`,
           unitPrice: Number(item.standard_price),
+          tiers: item.tiers.map((tier: { min_count: number; max_count: number; tier_price: unknown }) => ({
+            minCount: tier.min_count,
+            maxCount: tier.max_count,
+            price: Number(tier.tier_price),
+          })),
+          promotions: item.promotions.map(
+            (promo: {
+              promo_seq: number;
+              start_dt: Date | null;
+              end_dt: Date | null;
+              is_sliding: string;
+              promo_price: unknown;
+              promoTiers: Array<{ min_count: number; max_count: number; tier_price: unknown }>;
+            }) => ({
+              promoSeq: promo.promo_seq,
+              startDate: promo.start_dt ? promo.start_dt.toISOString() : null,
+              endDate: promo.end_dt ? promo.end_dt.toISOString() : null,
+              isSliding: promo.is_sliding,
+              price: Number(promo.promo_price),
+              tiers: promo.promoTiers.map((tier) => ({
+                minCount: tier.min_count,
+                maxCount: tier.max_count,
+                price: Number(tier.tier_price),
+              })),
+            }),
+          ),
         })),
         selectedColumns: pref?.selected_columns ? pref.selected_columns.split(",").filter(Boolean) : null,
       },
@@ -52,7 +137,7 @@ export async function GET(request: Request) {
 
   const year = Number(searchParams.get("year"));
   const type = (searchParams.get("type") || "AR").toUpperCase();
-  if (!Number.isFinite(year) || !["AR", "AP", "OP_COST"].includes(type)) {
+  if (!Number.isFinite(year) || !["AR", "AP", "OP_COST", "PROFIT"].includes(type)) {
     return Response.json({ message: "잘못된 조회 조건입니다." }, { status: 400 });
   }
 
@@ -73,7 +158,7 @@ export async function POST(request: Request) {
   const body = await request.json();
   const baseYear = toNumber(body.baseYear);
   const pnlType = String(body.pnlType || "AR").toUpperCase();
-  if (!Number.isFinite(baseYear) || !["AR", "AP", "OP_COST"].includes(pnlType)) {
+  if (!Number.isFinite(baseYear) || !["AR", "AP", "OP_COST", "PROFIT"].includes(pnlType)) {
     return Response.json({ message: "잘못된 입력입니다." }, { status: 400 });
   }
 
@@ -105,6 +190,8 @@ export async function POST(request: Request) {
       formula_targets: body.formula_targets || null,
       ref_qty_row_code: body.ref_qty_row_code || null,
       ref_unit_price_cd: body.ref_unit_price_cd || null,
+      promo_apply_actual: Boolean(body.promo_apply_actual),
+      vat_included_price: Boolean(body.vat_included_price),
       sort_order: nextOrder,
       company_target: 0,
     },
@@ -126,22 +213,30 @@ export async function PUT(request: Request) {
     const depthType = String(body?.depthType || "AR").toUpperCase();
     const prefRepo = (prisma as unknown as { pnlColumnPreference?: { upsert: Function } }).pnlColumnPreference;
     if (prefRepo) {
-      await prefRepo.upsert({
-        where: {
-          user_email_view_tab_depth_type: {
+      try {
+        await prefRepo.upsert({
+          where: {
+            user_email_view_tab_depth_type: {
+              user_email: session.user.email,
+              view_tab: viewTab,
+              depth_type: depthType,
+            },
+          },
+          update: { selected_columns: selectedColumns.join(",") },
+          create: {
             user_email: session.user.email,
             view_tab: viewTab,
             depth_type: depthType,
+            selected_columns: selectedColumns.join(","),
           },
-        },
-        update: { selected_columns: selectedColumns.join(",") },
-        create: {
-          user_email: session.user.email,
-          view_tab: viewTab,
-          depth_type: depthType,
-          selected_columns: selectedColumns.join(","),
-        },
-      });
+        });
+      } catch (error) {
+        const err = error as { code?: string };
+        if (err?.code !== "P2022") {
+          throw error;
+        }
+        // DB 스키마 미반영 시 컬럼 설정 저장은 건너뛰고 정상 응답
+      }
     }
     return Response.json({ message: "항목 설정이 저장되었습니다." }, { status: 200 });
   }
@@ -156,12 +251,23 @@ export async function PUT(request: Request) {
       prisma.pnlMaster.update({
         where: { pnl_seq: toNumber(item.pnl_seq) },
         data: {
+          grade: (item.grade as string) || null,
+          category1: (item.category1 as string) || null,
+          category2: (item.category2 as string) || null,
+          category3: (item.category3 as string) || null,
+          biz_detail: (item.biz_detail as string) || null,
+          biz_group: (item.biz_group as string) || null,
+          client_name: (item.client_name as string) || null,
+          row_label: (item.row_label as string) || null,
           row_type: (item.row_type as string) || undefined,
+          sort_order: toNumber(item.sort_order),
           company_target: toNumber(item.company_target),
           calc_mode: (item.calc_mode as string) || "AUTO",
           formula_targets: (item.formula_targets as string) || null,
           ref_qty_row_code: (item.ref_qty_row_code as string) || null,
           ref_unit_price_cd: (item.ref_unit_price_cd as string) || null,
+          promo_apply_actual: Boolean(item.promo_apply_actual),
+          vat_included_price: Boolean(item.vat_included_price),
           t_m01: toNumber(item.t_m01),
           t_m02: toNumber(item.t_m02),
           t_m03: toNumber(item.t_m03),
