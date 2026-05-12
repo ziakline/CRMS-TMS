@@ -7,6 +7,25 @@ function toNumber(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** `feePolicy.findMany` 결과 — prisma가 동적 캐스팅이라 배열에 타입을 붙여 map 콜백의 implicit any 방지 */
+type PnlMetaFeePolicyRow = {
+  policy_seq: number;
+  bank_cd: string;
+  fee_category: string;
+  service_type: string | null;
+  is_sliding: string;
+  standard_price: unknown;
+  tiers: Array<{ min_count: number; max_count: number; tier_price: unknown }>;
+  promotions: Array<{
+    promo_seq: number;
+    start_dt: Date | null;
+    end_dt: Date | null;
+    is_sliding: string;
+    promo_price: unknown;
+    promoTiers: Array<{ min_count: number; max_count: number; tier_price: unknown }>;
+  }>;
+};
+
 export async function GET(request: Request) {
   const session = await getServerSession(authOptions);
   if (!session?.user?.email) {
@@ -23,7 +42,7 @@ export async function GET(request: Request) {
         findMany: Function;
       };
     }).feePolicy;
-    const feePolicies = feeRepo
+    const feePolicies = (feeRepo
       ? await feeRepo.findMany({
           where: { is_active: "Y" },
           orderBy: [{ bank_cd: "asc" }, { fee_category: "asc" }, { service_type: "asc" }],
@@ -66,7 +85,7 @@ export async function GET(request: Request) {
             },
           },
         })
-      : [];
+      : []) as PnlMetaFeePolicyRow[];
     const prefRepo = (prisma as unknown as { pnlColumnPreference?: { findUnique: Function } }).pnlColumnPreference;
     let pref: { selected_columns?: string } | null = null;
     if (prefRepo) {
