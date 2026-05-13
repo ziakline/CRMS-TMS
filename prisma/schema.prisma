@@ -326,6 +326,8 @@ model PnlMaster {
   a_m10             Decimal  @default(0) @db.Decimal(18, 0)
   a_m11             Decimal  @default(0) @db.Decimal(18, 0)
   a_m12             Decimal  @default(0) @db.Decimal(18, 0)
+  /// 실적 월(a_m01~a_m12) 중 DB값이 0이어도 목표로 채우지 않을 월 — CSV (예: a_m01,a_m03). 저장 후 새로고침 시에도 유지
+  actual_explicit_months String? @db.VarChar(400)
 
   source_note       String?
   created_at        DateTime @default(now())

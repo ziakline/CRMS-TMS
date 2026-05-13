@@ -1,0 +1,36 @@
+---
+description: CRMS-TMS 프로젝트 하네스 — 손익·정산 도메인, 스택, UI 원칙
+alwaysApply: true
+---
+
+# CRMS-TMS (Project Harness)
+
+## 목적
+- B2B 자금·정산·손익(P&L) 도메인: 수수료 정책(슬라이딩·프로모션), 목표/실적 이원 그리드, iM뱅크·하나 등 은행별 단가 정책 연동.
+
+## 스택
+- Next.js 14 App Router, React, Tailwind.
+- PostgreSQL + Prisma. 스키마 변경 시 마이그레이션·유니크·배포(DB 컬럼 미반영)와 API 내부 try/catch(P2022 등) 호환 고려.
+- NextAuth — `NEXTAUTH_URL` 등 환경별 분리.
+- Vercel 빌드: `next build` 타입 검사 엄격. `any` 남발 금지; 동적 Prisma 캐스팅 구간은 **명시 타입** 또는 안전한 단언으로 implicit any 방지.
+
+## 손익 그리드 핵심 (`app/dashboard/finance/pnl-plan/`)
+- **월 키:** `t_m01`~`t_m12`(목표), `a_m01`~`a_m12`(실적). `effectiveRows`에서 `AMT_CALC`·소계·합계·이익은 `resolve()` 순서와 `byCode` 참조에 의존 — 변경 시 순환·누락 주의.
+- **실적 0 vs 미입력(QTY 등):** `actual_explicit_months`에 있는 월만 0을 목표로 채우지 않음. **`AMT_CALC` + `MANUAL_OVERRIDE`에서 실적 금액만 고친 월**도 같은 CSV에 넣어 저장·`resolve`에서 계산 대신 DB값 사용. **AUTO→MANUAL 시드 패치**(`calc_mode`만 전환·전월 복사) 때는 CSV를 건드리지 않아 실적은 계속 개수 기준 계산.
+- **`AMT_CALC` + `MANUAL_OVERRIDE`:** `t_m*`는 수기 목표. `a_m*`는 **기본** 참조 개수→`calcAmtByPolicy`(프로모·SETUP 규칙 동일); **실적 금액만 수기로 고친 월**은 `actual_explicit_months`에 있으면 그때만 DB `a_m*`을 쓴다(둘 다 만족: 목표만 수기인데 실적 금액은 자동 / 실적 금액만 저장 유지).
+- **프로모션·SETUP (금액 계산):** `calcAmtByPolicy` — **목표**는 SETUP일 때만 프로모 구간(`allowPromotionForGoal`). **실적**은 SETUP이면 목표와 동일하게 프로모 적용, 그 외 카테고리는 `promo_apply_actual` 체크 시에만.
+- **SETUP 슬라이딩 누적:** 프로모션 적용 월에서도 비운영 단가는 **연간 표준 누적(`standardCum`)**이 끊기지 않도록 처리됨 — 이 로직 깨지면 구간 단가가 틀어짐.
+- **부가세:** `vat_included_price`일 때 금액을 `Math.round(amount / 1.1)` 처리.
+- **이익(`PROFIT_CALC`):** `formula_targets` JSON으로 AR/AP `row_code` 묶음; 자동 합산. 월 편집 가능 여부는 `monthPnlDisabled`·탭·행 타입 조합으로 결정 — “항상 읽기 전용”이 아닐 수 있음.
+
+## API
+- `app/api/pnl/route.ts`: 조회·저장·meta(`feePolicy` 등). 업데이트 시 `actual_explicit_months`는 클라이언트에 키가 있을 때만 `explicitMonthsPatch`로 갱신.
+
+## UI/UX
+- **Dense B2B 그리드:** `py-0.5`, `px-1.5`, 작은 폰트, 소계/합계/이익 행 톤 교차, 스티키 열·크로스하이라이트는 **불투명 배경**으로 뒤 셀 비침 방지.
+- **금액 표시:** 콤마·포커스 시 raw 입력 등 기존 패턴 유지.
+- 실무 관점: 정산 1원 단위·누적 구간 오차 방지 우선.
+
+## 작업 원칙
+- 요청 범위 밖 리팩터·문서 파일 추가 금지(사용자가 요청한 경우만).
+- 손익·수수료 로직 변경 시 목표/실적 탭·저장·프로모 플래그·명시 월 CSV를 함께 검증.

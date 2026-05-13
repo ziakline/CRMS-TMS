@@ -7,6 +7,15 @@ function toNumber(value: unknown) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/** 클라이언트가 보내지 않으면 DB의 해당 필드는 그대로 둠 */
+function explicitMonthsPatch(item: Record<string, unknown>): { actual_explicit_months?: string | null } {
+  if (!("actual_explicit_months" in item)) return {};
+  const v = item.actual_explicit_months;
+  if (v === null) return { actual_explicit_months: null };
+  const s = String(v ?? "").trim();
+  return { actual_explicit_months: s || null };
+}
+
 /** `feePolicy.findMany` 결과 — prisma가 동적 캐스팅이라 배열에 타입을 붙여 map 콜백의 implicit any 방지 */
 type PnlMetaFeePolicyRow = {
   policy_seq: number;
@@ -311,6 +320,7 @@ export async function PUT(request: Request) {
           a_m10: toNumber(item.a_m10),
           a_m11: toNumber(item.a_m11),
           a_m12: toNumber(item.a_m12),
+          ...explicitMonthsPatch(item),
         },
       }),
     ),

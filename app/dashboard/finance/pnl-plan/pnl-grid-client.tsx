@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type FocusEvent, type MouseEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
 
 type DepthType = "AR" | "AP" | "OP_COST" | "PROFIT";
 type ViewTab = "goal" | "actual";
@@ -27,6 +28,8 @@ type PnlRow = {
   ref_unit_price_cd: string | null;
   promo_apply_actual?: boolean;
   vat_included_price?: boolean;
+  /** a_m*가 0일 때 목표로 채우지 않을 월 CSV (a_m01,...) — 저장 후에도 유지 */
+  actual_explicit_months?: string | null;
   sort_order: number;
   prev_year_actual: number;
   company_target: number;
@@ -72,6 +75,29 @@ const actualKeys = Array.from({ length: 12 }, (_, i) => `a_m${String(i + 1).padS
 const PNL_COL_SORT = "__pnl_sort__";
 const PNL_COL_ACTIONS = "__pnl_actions__";
 
+/** DB의 actual_explicit_months CSV → 월키 집합 */
+function parseActualExplicitMonthsSet(csv: unknown): Set<string> {
+  return new Set(
+    String(csv ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => actualKeys.includes(s)),
+  );
+}
+
+/** 목표 금액: 개설(SETUP)은 정책상 프로모션 구간을 수량계획에 반영, 운영(OPERATION) 등은 표준 단가만 */
+function allowPromotionForGoal(policy: FeeOption | undefined): boolean {
+  if (!policy) return false;
+  return String(policy.feeCategory ?? "").toUpperCase() === "SETUP";
+}
+
+/** 실적 금액: 개설(SETUP)은 목표와 동일하게 정책 프로모션 구간 적용, 그 외는「프로모션 적용(실적)」체크 시에만 */
+function allowPromotionForActual(policy: FeeOption | undefined, row: PnlRow): boolean {
+  if (!policy) return false;
+  if (String(policy.feeCategory ?? "").toUpperCase() === "SETUP") return true;
+  return Boolean(row.promo_apply_actual);
+}
+
 /** 목표 탭이면 t_m*, 실적 탭이면 a_m*가 선택에 없을 때 추가 — 실적 탭에서 계산 열이 통째로 빠지는 문제 방지 */
 function ensureTabMonthKeysInSelection(cols: string[], tab: ViewTab): string[] {
   const set = new Set(cols);
@@ -105,11 +131,25 @@ function withComma(value: unknown) {
   return toNumber(value).toLocaleString("ko-KR");
 }
 
-/** 불투명만 사용 — 반투명이면 스크롤된 월 열이 스티키 열 뒤로 비쳐 보임 */
+/** 십자 하이라이트 — 행/열 배경(`styleByType`의 bg-*`)보다 위에 오도록 important */
 function crosshairShade(rowHi: boolean, colHi: boolean) {
-  if (rowHi && colHi) return " bg-sky-200";
-  if (rowHi || colHi) return " bg-sky-100";
+  if (rowHi && colHi) return " !bg-sky-200";
+  if (rowHi || colHi) return " !bg-sky-100";
   return "";
+}
+
+/** 엑셀처럼 포커스/TAB 이동 시 값 전체 선택 — 타이핑 시 한 번에 덮어쓰기 */
+function selectAllOnFocus(e: FocusEvent<HTMLInputElement>) {
+  requestAnimationFrame(() => {
+    const t = e.target;
+    if (t && !t.disabled && document.activeElement === t && typeof t.select === "function") t.select();
+  });
+}
+
+/** 이미 포커스된 칸을 다시 클릭할 때만 기본 동작 막기 — 첫 클릭에서 포커스가 막히지 않게 */
+function inputMouseDownSelectAll(e: MouseEvent<HTMLInputElement>) {
+  if (e.currentTarget.disabled) return;
+  if (document.activeElement === e.currentTarget) e.preventDefault();
 }
 
 function sumByKeys(row: PnlRow, keys: string[]) {
@@ -200,6 +240,8 @@ function calcAmtByPolicy(
       }
       if (!isOperationFee) {
         promoCumBySeq.set(promo.promoSeq, promoCum + qty);
+        // 프로모션 월이어도 개설(SETUP) 등 연간 누적 구간은 YTD 개수를 맞춰야 이후 일반 단가 슬라이딩이 깨지지 않음
+        standardCum += qty;
       }
       return amount;
     }
@@ -473,53 +515,77 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
 
     const resolve = (row: PnlRow): PnlRow => {
       if (cache.has(row.row_code)) return cache.get(row.row_code)!;
+      const actualExplicit = parseActualExplicitMonthsSet(row.actual_explicit_months);
       let next = { ...row } as PnlRow;
 
-      if (row.row_type === "AMT_CALC" && row.calc_mode !== "MANUAL_OVERRIDE" && row.ref_qty_row_code && row.ref_unit_price_cd) {
-        const qtyRow = byCode.get(row.ref_qty_row_code);
-        const policy = policyByCode.get(row.ref_unit_price_cd);
+      const resolvedActualMonth = (r: PnlRow, ak: string, gk: string) => {
+        const raw = toNumber(r[ak]);
+        if (actualExplicit.has(ak)) return raw;
+        if (raw !== 0) return raw;
+        return toNumber(r[gk]);
+      };
+
+      if (row.row_type === "AMT_CALC" && row.calc_mode === "MANUAL_OVERRIDE") {
+        const qtyRow = row.ref_qty_row_code ? byCode.get(row.ref_qty_row_code) : undefined;
+        const policy = row.ref_unit_price_cd ? policyByCode.get(row.ref_unit_price_cd) : undefined;
         if (qtyRow && policy) {
-          // 원본 row의 a_m*가 비어 있으면 아래 QTY/AMT_INPUT 분기에서 목표값으로 채워지므로,
-          // 계산 금액도 그 "표시용 실적 개수"를 써야 실적 탭에서 금액이 맞는다.
+          // 목표만 수기(MANUAL)여도 실적 금액은 참조 개수→단가 계산 유지. 실적 월을 직접 고친 경우만 actual_explicit_months에 있으면 DB값 사용.
           const qtyResolved = resolve(qtyRow);
-          const goalQty = goalKeys.map((key) => toNumber(qtyResolved[key]));
           const actualQty = actualKeys.map((key) => toNumber(qtyResolved[key]));
-          const goalAmounts = calcAmtByPolicy(year, goalQty, policy, false, Boolean(row.vat_included_price));
           const actualAmounts = calcAmtByPolicy(
             year,
             actualQty,
             policy,
-            Boolean(row.promo_apply_actual),
+            allowPromotionForActual(policy, row),
             Boolean(row.vat_included_price),
           );
           for (let i = 0; i < 12; i += 1) {
             const gk = goalKeys[i];
             const ak = actualKeys[i];
-            next[gk] = goalAmounts[i];
-            next[ak] = actualAmounts[i];
+            next[gk] = toNumber(row[gk]);
+            next[ak] = actualExplicit.has(ak) ? toNumber(row[ak]) : actualAmounts[i];
+          }
+        } else {
+          for (let i = 0; i < 12; i += 1) {
+            const gk = goalKeys[i];
+            const ak = actualKeys[i];
+            next[ak] = resolvedActualMonth(row, ak, gk);
+          }
+        }
+      } else if (row.row_type === "AMT_CALC" && row.ref_qty_row_code && row.ref_unit_price_cd) {
+        const qtyRow = byCode.get(row.ref_qty_row_code);
+        const policy = policyByCode.get(row.ref_unit_price_cd);
+        if (qtyRow && policy) {
+          const qtyResolved = resolve(qtyRow);
+          const goalQty = goalKeys.map((key) => toNumber(qtyResolved[key]));
+          const actualQty = actualKeys.map((key) => toNumber(qtyResolved[key]));
+          const actualAmounts = calcAmtByPolicy(
+            year,
+            actualQty,
+            policy,
+            allowPromotionForActual(policy, row),
+            Boolean(row.vat_included_price),
+          );
+          for (let i = 0; i < 12; i += 1) {
+            next[actualKeys[i]] = actualAmounts[i];
+          }
+          const goalAmounts = calcAmtByPolicy(
+            year,
+            goalQty,
+            policy,
+            allowPromotionForGoal(policy),
+            Boolean(row.vat_included_price),
+          );
+          for (let i = 0; i < 12; i += 1) {
+            next[goalKeys[i]] = goalAmounts[i];
           }
         }
       }
-
-      // 목표 탭에서만 수기로 넣은 금액(MANUAL_OVERRIDE)은 a_m*가 비어 있으면 0으로 남음 → 실적 탭에도 목표와 동일하게 보이도록
-      if (row.row_type === "AMT_CALC" && row.calc_mode === "MANUAL_OVERRIDE") {
-        for (let i = 0; i < 12; i += 1) {
-          const gk = goalKeys[i];
-          const ak = actualKeys[i];
-          if (toNumber(row[ak]) === 0) {
-            next[ak] = toNumber(row[gk]);
-          }
-        }
-      }
-
       if (row.row_type === "QTY_INPUT" || row.row_type === "AMT_INPUT") {
         for (let i = 0; i < 12; i += 1) {
           const gk = goalKeys[i];
           const ak = actualKeys[i];
-          const actualValue = toNumber(row[ak]);
-          if (actualValue === 0) {
-            next[ak] = toNumber(row[gk]);
-          }
+          next[ak] = resolvedActualMonth(row, ak, gk);
         }
       }
 
@@ -588,8 +654,47 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
 
   const patchRow = (pnlSeq: number, patch: Partial<PnlRow>) => {
     setRows((prev) => {
-      const next = prev.map((row) => (row.pnl_seq === pnlSeq ? { ...row, ...patch } : row));
-      const target = next.find((row) => row.pnl_seq === pnlSeq);
+      const row = prev.find((r) => r.pnl_seq === pnlSeq);
+      if (!row) {
+        return prev.map((r) => (r.pnl_seq === pnlSeq ? { ...r, ...patch } : r));
+      }
+      let merged: Partial<PnlRow> = { ...patch };
+      if (viewTab === "actual") {
+        const touched = Object.keys(patch).filter((k) => actualKeys.includes(k));
+        if (touched.length > 0) {
+          const enteringManualAmtFromAuto =
+            row.row_type === "AMT_CALC" &&
+            row.calc_mode !== "MANUAL_OVERRIDE" &&
+            patch.calc_mode === "MANUAL_OVERRIDE";
+
+          const set = new Set(
+            String(row.actual_explicit_months ?? "")
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean),
+          );
+          if (enteringManualAmtFromAuto) {
+            // AUTO→MANUAL 시드(전월 복사): explicit을 건드리지 않음 → resolve에서 실적 금액은 계산값 우선
+          } else if (
+            row.row_type === "AMT_CALC" &&
+            (row.calc_mode === "MANUAL_OVERRIDE" || patch.calc_mode === "MANUAL_OVERRIDE")
+          ) {
+            for (const m of touched) {
+              set.add(m);
+            }
+            merged.actual_explicit_months = set.size > 0 ? [...set].sort().join(",") : null;
+          } else {
+            for (const m of touched) {
+              const v = toNumber((patch as Record<string, unknown>)[m]);
+              if (v !== 0) set.delete(m);
+              else set.add(m);
+            }
+            merged.actual_explicit_months = set.size > 0 ? [...set].sort().join(",") : null;
+          }
+        }
+      }
+      const next = prev.map((r) => (r.pnl_seq === pnlSeq ? { ...r, ...merged } : r));
+      const target = next.find((r) => r.pnl_seq === pnlSeq);
       if (target) setDirty((prevDirty) => ({ ...prevDirty, [pnlSeq]: target }));
       return next;
     });
@@ -976,8 +1081,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                         stickyKeyOrder.includes(column.key) ? "text-center" : "text-right"
                       } ${
                         stickyKeyOrder.includes(column.key)
-                          ? `sticky top-0 z-50 border-b border-r border-slate-200 shadow-[1px_0_0_0_rgba(226,232,240,0.9)] ${hoverColKey === column.key ? "bg-sky-100" : "bg-slate-100"}`
-                          : `sticky top-0 z-40 border-b border-slate-200 ${hoverColKey === column.key ? "bg-sky-100" : "bg-slate-100"}`
+                          ? `sticky top-0 z-50 border-b border-r border-slate-200 shadow-[1px_0_0_0_rgba(226,232,240,0.9)] ${hoverColKey === column.key ? "!bg-sky-100" : "bg-slate-100"}`
+                          : `sticky top-0 z-40 border-b border-slate-200 ${hoverColKey === column.key ? "!bg-sky-100" : "bg-slate-100"}`
                       }`}
                       style={
                         stickyKeyOrder.includes(column.key)
@@ -999,7 +1104,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                       key={key}
                       onMouseEnter={() => setHoverColKey(key)}
                       className={`sticky top-0 z-40 border-b border-slate-200 px-1.5 py-1 text-right font-semibold text-slate-700 ${
-                        hoverColKey === key ? "bg-sky-100" : "bg-slate-100"
+                        hoverColKey === key ? "!bg-sky-100" : "bg-slate-100"
                       }`}
                       style={{ minWidth: monthColWidth, width: monthColWidth }}
                     >
@@ -1011,7 +1116,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                       <th
                         onMouseEnter={() => setHoverColKey(PNL_COL_SORT)}
                         className={`sticky top-0 z-40 min-w-[32px] border-b border-slate-200 px-1 py-1 text-center font-semibold text-slate-700 ${
-                          hoverColKey === PNL_COL_SORT ? "bg-sky-100" : "bg-slate-100"
+                          hoverColKey === PNL_COL_SORT ? "!bg-sky-100" : "bg-slate-100"
                         }`}
                       >
                         순서
@@ -1019,7 +1124,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                       <th
                         onMouseEnter={() => setHoverColKey(PNL_COL_ACTIONS)}
                         className={`sticky top-0 z-40 min-w-[58px] border-b border-slate-200 px-1 py-1 text-center font-semibold text-slate-700 ${
-                          hoverColKey === PNL_COL_ACTIONS ? "bg-sky-100" : "bg-slate-100"
+                          hoverColKey === PNL_COL_ACTIONS ? "!bg-sky-100" : "bg-slate-100"
                         }`}
                       >
                         작업
@@ -1119,6 +1224,12 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                                 value={String(row[column.key] ?? "")}
                                 onChange={(e) => patchRow(row.pnl_seq, { [column.key]: e.target.value } as Partial<PnlRow>)}
                                 disabled={!canEditGoal && viewTab === "goal"}
+                                onMouseEnter={() => {
+                                  setHoverPnlSeq(row.pnl_seq);
+                                  setHoverColKey(column.key);
+                                }}
+                                onMouseDown={inputMouseDownSelectAll}
+                                onFocus={selectAllOnFocus}
                                 className={`min-w-0 w-full bg-transparent px-0 text-center outline-none ${estimateCls}${estimateAmountHighlight ? " disabled:text-red-400" : ""}`}
                               />
                             </td>
@@ -1136,6 +1247,12 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                               value={withComma(row.company_target)}
                               onChange={(e) => patchRow(row.pnl_seq, { company_target: toNumber(e.target.value) })}
                               disabled={!canEditGoal && viewTab === "goal"}
+                              onMouseEnter={() => {
+                                setHoverPnlSeq(row.pnl_seq);
+                                setHoverColKey("company_target");
+                              }}
+                              onMouseDown={inputMouseDownSelectAll}
+                              onFocus={selectAllOnFocus}
                               className={`w-full bg-transparent text-right outline-none disabled:cursor-not-allowed ${estimateAmountHighlight ? "disabled:text-red-400" : "disabled:text-slate-400"} ${estimateCls}`}
                             />
                           ),
@@ -1173,9 +1290,24 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                             <input
                                 value={monthDisplayValue}
                                 placeholder={placeholderGoal}
-                                onFocus={() => {
-                                  setMonthEditFocus({ pnlSeq: row.pnl_seq, key });
-                                  setMonthEditDraft(String(Math.trunc(toNumber(row[key]))));
+                                onMouseEnter={() => {
+                                  setHoverPnlSeq(row.pnl_seq);
+                                  setHoverColKey(key);
+                                }}
+                                onMouseDown={monthPnlDisabled ? undefined : inputMouseDownSelectAll}
+                                onFocus={(e) => {
+                                  if (monthPnlDisabled) return;
+                                  const el = e.currentTarget;
+                                  // 표시값이 콤마 포함(withComma) → 포커스 직후 숫자만(draft)으로 바뀌므로,
+                                  // 비동기 select()는 리렌더 전에 돌아 선택이 무효화됨 → TAB 후 첫 입력이 덧붙음.
+                                  flushSync(() => {
+                                    setMonthEditFocus({ pnlSeq: row.pnl_seq, key });
+                                    setMonthEditDraft(String(Math.trunc(toNumber(row[key]))));
+                                  });
+                                  if (!el.disabled && document.activeElement === el) el.select();
+                                  requestAnimationFrame(() => {
+                                    if (!el.disabled && document.activeElement === el) el.select();
+                                  });
                                 }}
                                 onBlur={() => {
                                   setMonthEditFocus(null);
@@ -1227,9 +1359,10 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                                   if (
                                     row.row_type === "AMT_CALC" &&
                                     row.calc_mode !== "MANUAL_OVERRIDE" &&
-                                    isOverrideAllowed(row, policyByCode) &&
-                                    ((viewTab === "goal" && goalKeys.includes(key)) ||
-                                      (viewTab === "actual" && actualKeys.includes(key)))
+                                    ((viewTab === "actual" && actualKeys.includes(key)) ||
+                                      (viewTab === "goal" &&
+                                        goalKeys.includes(key) &&
+                                        isOverrideAllowed(row, policyByCode)))
                                   ) {
                                     const patch: Partial<PnlRow> = { calc_mode: "MANUAL_OVERRIDE" };
                                     for (const gk of goalKeys) (patch as Record<string, number>)[gk] = toNumber(row[gk]);
@@ -1243,11 +1376,11 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                                 disabled={monthPnlDisabled}
                                 className={`w-full text-right text-[11px] outline-none placeholder:text-slate-400 ${
                                   estimateAmountHighlight
-                                    ? `font-bold text-red-600 disabled:text-red-400 ${viewTab === "actual" ? "bg-slate-100" : "bg-transparent"}`
+                                    ? "font-bold bg-transparent text-red-600 disabled:text-red-400"
                                     : isSummary
                                       ? `bg-transparent ${viewTab === "actual" ? "text-slate-600" : "text-slate-800"}`
                                       : viewTab === "actual"
-                                        ? "bg-slate-100 text-slate-600"
+                                        ? "bg-transparent text-slate-600"
                                         : "bg-transparent text-slate-800"
                                 }`}
                               />
