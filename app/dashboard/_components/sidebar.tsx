@@ -120,8 +120,8 @@ export default function Sidebar({ userName }: SidebarProps) {
 
   return (
     <aside
-      className={`sticky top-0 flex h-screen shrink-0 flex-col overflow-x-visible overflow-y-auto bg-slate-900 text-slate-100 transition-all duration-300 ${
-        collapsed ? "w-16" : "w-full max-w-[15rem]"
+      className={`sticky top-0 flex h-screen shrink-0 flex-col overflow-x-visible overflow-y-auto bg-slate-900 text-slate-100 transition-[width] duration-300 ease-in-out ${
+        collapsed ? "w-16" : "w-60"
       }`}
     >
       <div className={`border-b border-slate-800 ${collapsed ? "px-2 py-4" : "px-6 py-6"}`}>

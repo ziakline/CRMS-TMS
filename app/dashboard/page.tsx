@@ -2,8 +2,7 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "../../lib/auth-options";
 import { prisma } from "../../lib/prisma";
-import { getDashboardStats } from "../../lib/dashboard-stats";
-import { formatKstDateTime } from "../../lib/time";
+import { getDashboardModuleSyncLabels, getDashboardStats } from "../../lib/dashboard-stats";
 import DashboardContent from "./_components/dashboard-content";
 import Sidebar from "./_components/sidebar";
 
@@ -51,15 +50,8 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
     lt: new Date(Date.UTC(selectedYear + 1, 0, 1)),
   };
 
-  const [stats, latestHistory, recentHistories] = await Promise.all([
+  const [stats, recentHistories, syncLabels] = await Promise.all([
     getDashboardStats(selectedYear),
-    prisma.manualHistory.findFirst({
-      where: {
-        change_dt: yearRange,
-      },
-      orderBy: { change_dt: "desc" },
-      select: { change_dt: true },
-    }),
     prisma.manualHistory.findMany({
       where: {
         change_dt: yearRange,
@@ -74,6 +66,7 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
         change_dt: true,
       },
     }),
+    getDashboardModuleSyncLabels(selectedYear),
   ]);
 
   const now = new Date();
@@ -81,19 +74,16 @@ export default async function DashboardPage({ searchParams }: DashboardPageProps
   const userName = session.user.name ?? "사용자";
   const currentDateText = formatDate(now);
   
-  const latestSyncText = latestHistory?.change_dt
-    ? formatKstDateTime(latestHistory.change_dt)
-    : "-";
-
   return (
-    <div className="flex min-h-screen bg-slate-100">
+    <div className="flex min-h-screen min-w-0 overflow-x-hidden bg-slate-100">
       <Sidebar userName={userName} />
       <DashboardContent
         userName={userName}
         currentDateText={currentDateText}
         greetingText={greeting}
         initialStats={stats}
-        latestSyncText={latestSyncText}
+        latestArSyncText={syncLabels.ar}
+        latestApSyncText={syncLabels.ap}
         selectedYear={selectedYear}
         recentHistories={recentHistories.map((history) => ({
           ...history,

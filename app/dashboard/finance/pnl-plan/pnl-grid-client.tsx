@@ -1,7 +1,25 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FocusEvent, type MouseEvent, type ReactNode } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FocusEvent,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { flushSync } from "react-dom";
+import {
+  cellNoteFlagKey,
+  isPnlCellCompleted,
+  PnlCellAuditHost,
+  readCellCompletion,
+  type PnlCellAuditHostRef,
+  type PnlCellTargetPayload,
+} from "./_components/pnl-cell-audit";
 
 type DepthType = "AR" | "AP" | "OP_COST" | "PROFIT";
 type ViewTab = "goal" | "actual";
@@ -30,6 +48,8 @@ type PnlRow = {
   vat_included_price?: boolean;
   /** a_m*가 0일 때 목표로 채우지 않을 월 CSV (a_m01,...) — 저장 후에도 유지 */
   actual_explicit_months?: string | null;
+  /** 월 셀 완료 표시 JSON — 서버 TB_PNL_MASTER.cell_completion */
+  cell_completion?: unknown;
   sort_order: number;
   prev_year_actual: number;
   company_target: number;
@@ -74,6 +94,24 @@ const goalKeys = Array.from({ length: 12 }, (_, i) => `t_m${String(i + 1).padSta
 const actualKeys = Array.from({ length: 12 }, (_, i) => `a_m${String(i + 1).padStart(2, "0")}`);
 const PNL_COL_SORT = "__pnl_sort__";
 const PNL_COL_ACTIONS = "__pnl_actions__";
+
+type CrmsSheetMonthDetail = {
+  col_detail: string;
+  col_category: string;
+  col_code: string;
+  col_client: string;
+  col_item: string;
+  amount: number;
+};
+type CrmsSheetRow = { hasAny: boolean; months: Record<string, CrmsSheetMonthDetail | null>; yearSum: number };
+
+/** visible 월 키(t_m* / a_m*)에서 짝이 되는 목표·실적 키와 월 번호(1~12) */
+function monthPairFromVisibleKey(key: string): { goalKey: string; actualKey: string; monthNum: number } {
+  const m = key.match(/_m(0[1-9]|1[0-2])/i);
+  const mm = m ? m[1] : "01";
+  const monthNum = Number(mm);
+  return { goalKey: `t_m${mm}`, actualKey: `a_m${mm}`, monthNum };
+}
 
 /** DB의 actual_explicit_months CSV → 월키 집합 */
 function parseActualExplicitMonthsSet(csv: unknown): Set<string> {
@@ -149,6 +187,11 @@ function selectAllOnFocus(e: FocusEvent<HTMLInputElement>) {
 /** 이미 포커스된 칸을 다시 클릭할 때만 기본 동작 막기 — 첫 클릭에서 포커스가 막히지 않게 */
 function inputMouseDownSelectAll(e: MouseEvent<HTMLInputElement>) {
   if (e.currentTarget.disabled) return;
+  // 우클릭 시 입력 포커스 + onFocus(flushSync)가 먼저 돌면 행이 한 칸 밀리는 것처럼 보임 → 컨텍스트 메뉴만 쓸 때는 포커스 막기
+  if (e.button === 2) {
+    e.preventDefault();
+    return;
+  }
   if (document.activeElement === e.currentTarget) e.preventDefault();
 }
 
@@ -357,11 +400,13 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
   const [showEdit, setShowEdit] = useState(false);
   const [editRowSeq, setEditRowSeq] = useState<number | null>(null);
   const [selectedColumns, setSelectedColumns] = useState<string[]>([]);
+  const [metaLoading, setMetaLoading] = useState(true);
   const [goalEditMode, setGoalEditMode] = useState(false);
   const [monthEditFocus, setMonthEditFocus] = useState<{ pnlSeq: number; key: string } | null>(null);
   const [monthEditDraft, setMonthEditDraft] = useState<string>("");
   const [hoverPnlSeq, setHoverPnlSeq] = useState<number | null>(null);
   const [hoverColKey, setHoverColKey] = useState<string | null>(null);
+  const cellAuditRef = useRef<PnlCellAuditHostRef>(null);
   const [form, setForm] = useState({
     grade: "",
     category1: "",
@@ -441,6 +486,57 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
     }
   };
 
+  const [cellNoteFlags, setCellNoteFlags] = useState<Record<string, boolean>>({});
+  const [cellHistoryFlags, setCellHistoryFlags] = useState<Record<string, boolean>>({});
+  const [showCompareModal, setShowCompareModal] = useState(false);
+  const [compareDraftGoalActual, setCompareDraftGoalActual] = useState(false);
+  const [compareDraftCrms, setCompareDraftCrms] = useState(false);
+  const [compareSavedGoalActual, setCompareSavedGoalActual] = useState(false);
+  const [compareSavedCrms, setCompareSavedCrms] = useState(false);
+  const [crmsSheet, setCrmsSheet] = useState<Record<number, CrmsSheetRow>>({});
+  const comparePaneActive = compareSavedGoalActual || compareSavedCrms;
+
+  const loadCellNoteFlags = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/pnl/cell?summary=1&base_year=${encodeURIComponent(String(year))}&pnl_type=${encodeURIComponent(depthType)}`,
+      );
+      const json = await readJsonSafe(res);
+      if (!res.ok) return;
+      setCellNoteFlags((json.flags as Record<string, boolean>) || {});
+      setCellHistoryFlags((json.historyFlags as Record<string, boolean>) || {});
+    } catch {
+      setCellNoteFlags({});
+      setCellHistoryFlags({});
+    }
+  }, [year, depthType]);
+
+  const loadCrmsSheet = useCallback(async () => {
+    if (!compareSavedCrms) {
+      setCrmsSheet({});
+      return;
+    }
+    try {
+      const res = await fetch(
+        `/api/pnl/crms-mapping?mode=sheet_grid&base_year=${encodeURIComponent(String(year))}&pnl_type=${encodeURIComponent(depthType)}`,
+      );
+      const json = await readJsonSafe(res);
+      if (!res.ok) return;
+      const raw = (json.byPnlSeq as Record<string, CrmsSheetRow>) || {};
+      const mapped: Record<number, CrmsSheetRow> = {};
+      for (const [k, v] of Object.entries(raw)) {
+        mapped[Number(k)] = v;
+      }
+      setCrmsSheet(mapped);
+    } catch {
+      setCrmsSheet({});
+    }
+  }, [year, depthType, compareSavedCrms]);
+
+  useEffect(() => {
+    void loadCrmsSheet();
+  }, [loadCrmsSheet]);
+
   const loadRows = async () => {
     setLoading(true);
     setMessage(null);
@@ -452,6 +548,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
       setRows(Array.isArray(json.rows) ? (json.rows as PnlRow[]) : []);
       setDirty({});
       if (Array.isArray(json.rows) && json.rows.length > 0) setSetupStarted(true);
+      void loadCellNoteFlags();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : "조회 오류");
     } finally {
@@ -475,6 +572,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
   };
 
   const loadMeta = async () => {
+    setMetaLoading(true);
     try {
       const res = await fetch(`/api/pnl?mode=meta&viewTab=${viewTab}&depthType=${depthType}`);
       const json = await readJsonSafe(res);
@@ -490,6 +588,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
     } catch {
       setMessage("항목 설정 메타 조회 중 오류가 발생했습니다.");
       setSelectedColumns(defaultSelectedColumns);
+    } finally {
+      setMetaLoading(false);
     }
   };
 
@@ -889,6 +989,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
   const qtyRows = rows.filter((row) => row.row_type === "QTY_INPUT");
   const canEditGoal = viewTab === "goal" ? goalEditMode : true;
   const showOrderActions = viewTab === "goal" && goalEditMode;
+  const showOrderActionsEffective = showOrderActions && !comparePaneActive;
   const hasPromoByCode = useMemo(
     () =>
       new Map(
@@ -967,23 +1068,155 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
     }
     return map;
   }, [visibleBaseColumns, stickyWidthMap]);
-  const tableTrailingColSpan = visibleBaseColumns.length + visibleMonthKeys.length + (showOrderActions ? 2 : 0);
+  const compareLabelColW = 40;
+  const COMPARE_SUMMARY_KEYS = ["row_label", "target_sum", "actual_sum"] as const;
+  const compareBaseSplit = useMemo((): {
+    before: ColumnDef[];
+    trio: ColumnDef[];
+    after: ColumnDef[];
+    trioColSpan: number;
+  } => {
+    const cols = visibleBaseColumns;
+    const trioOrdered: ColumnDef[] = [];
+    for (const k of COMPARE_SUMMARY_KEYS) {
+      const c = cols.find((x) => x.key === k);
+      if (c) trioOrdered.push(c);
+    }
+    if (trioOrdered.length === 0) {
+      return { before: cols, trio: [], after: [], trioColSpan: 0 };
+    }
+    const idxs = trioOrdered.map((t) => cols.findIndex((c) => c.key === t.key));
+    const lo = Math.min(...idxs);
+    const hi = Math.max(...idxs);
+    return {
+      before: cols.slice(0, lo),
+      trio: trioOrdered,
+      after: cols.slice(hi + 1),
+      trioColSpan: trioOrdered.length,
+    };
+  }, [visibleBaseColumns]);
+  const compareLabelLeft = useMemo(() => {
+    let w = 0;
+    for (const col of visibleBaseColumns) {
+      if (stickyKeyOrder.includes(col.key)) w += stickyWidthMap[col.key] ?? 100;
+      else if (col.key === "prev_year_actual") w += prevYearWidth;
+      else w += monthColWidth;
+    }
+    return w;
+  }, [visibleBaseColumns, stickyWidthMap, prevYearWidth, monthColWidth]);
+  const tableTrailingColSpan =
+    visibleBaseColumns.length +
+    (comparePaneActive ? 1 : 0) +
+    visibleMonthKeys.length +
+    (showOrderActionsEffective ? 2 : 0);
+
+  type CompareKind = "tab" | "goal" | "actual" | "crms";
+  const compareLayersForRow = useCallback(
+    (row: PnlRow): { label: string; kind: CompareKind }[] => {
+      if (!comparePaneActive) return [{ label: "", kind: "tab" }];
+      const crmsOn = compareSavedCrms && Boolean(crmsSheet[row.pnl_seq]?.hasAny);
+      if (compareSavedGoalActual && crmsOn) {
+        return [
+          { label: "목표", kind: "goal" },
+          { label: "실적", kind: "actual" },
+          { label: "CRMS", kind: "crms" },
+        ];
+      }
+      if (compareSavedGoalActual) {
+        return [
+          { label: "목표", kind: "goal" },
+          { label: "실적", kind: "actual" },
+        ];
+      }
+      if (crmsOn) {
+        return [
+          { label: viewTab === "goal" ? "목표" : "실적", kind: "tab" },
+          { label: "CRMS", kind: "crms" },
+        ];
+      }
+      return [{ label: viewTab === "goal" ? "목표" : "실적", kind: "tab" }];
+    },
+    [comparePaneActive, compareSavedGoalActual, compareSavedCrms, crmsSheet, viewTab],
+  );
+
+  const buildCellAuditPayload = useCallback((row: PnlRow, key: string, monthIdx: number): PnlCellTargetPayload => {
+    return {
+      pnl_seq: row.pnl_seq,
+      cell_key: key,
+      monthLabel: `${monthIdx + 1}월`,
+      cell_completion: readCellCompletion(row),
+      snap: {
+        category3: row.category3,
+        category2: row.category2,
+        biz_group: row.biz_group,
+        client_name: row.client_name,
+        row_label: row.row_label,
+        biz_detail: row.biz_detail,
+        goalVal: toNumber(row[goalKeys[monthIdx]]),
+        actualVal: toNumber(row[actualKeys[monthIdx]]),
+      },
+    };
+  }, []);
 
   return (
     <div className="min-w-0 space-y-4">
-      <div className="flex items-center justify-between gap-3">
+      <PnlCellAuditHost
+        ref={cellAuditRef}
+        patchRow={patchRow}
+        setBanner={setMessage}
+        onCellNotesMutated={loadCellNoteFlags}
+        mappingSheet={{ year, pnlType: depthType }}
+      />
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <h1 className="text-2xl font-bold text-slate-900">{year}년 손익계획</h1>
-        <select
-          value={year}
-          onChange={(e) => setYear(toNumber(e.target.value) || initialYear)}
-          className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
-        >
-          {yearOptions.map((option) => (
-            <option key={option} value={option}>
-              {option}년
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={year}
+            onChange={(e) => setYear(toNumber(e.target.value) || initialYear)}
+            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+          >
+            {yearOptions.map((option) => (
+              <option key={option} value={option}>
+                {option}년
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "goal" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
+            onClick={() => setViewTab("goal")}
+          >
+            목표
+          </button>
+          <button
+            type="button"
+            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "actual" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
+            onClick={() => {
+              setViewTab("actual");
+              setGoalEditMode(false);
+            }}
+          >
+            실적
+          </button>
+          <button
+            type="button"
+            disabled={viewTab !== "goal"}
+            title={viewTab !== "goal" ? "목표 탭에서만 사용할 수 있습니다." : undefined}
+            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+              viewTab !== "goal"
+                ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                : goalEditMode
+                  ? "bg-amber-600 text-white"
+                  : "bg-slate-200 text-slate-700"
+            }`}
+            onClick={() => {
+              if (viewTab !== "goal") return;
+              setGoalEditMode((prev) => !prev);
+            }}
+          >
+            목표 편집 {goalEditMode ? "ON" : "OFF"}
+          </button>
+        </div>
       </div>
 
       {message ? <p className="text-sm text-slate-700">{message}</p> : null}
@@ -1000,65 +1233,57 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
         </div>
       ) : (
         <>
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "goal" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
-              onClick={() => setViewTab("goal")}
-            >
-              목표
-            </button>
-            <button
-              type="button"
-              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "actual" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
-              onClick={() => setViewTab("actual")}
-            >
-              실적
-            </button>
-            {viewTab === "goal" ? (
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {[
+                { key: "AR", label: "AR" },
+                { key: "AP", label: "AP" },
+                { key: "OP_COST", label: "부서운영비" },
+                { key: "PROFIT", label: "영업이익" },
+              ].map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`rounded-md px-3 py-1.5 text-sm font-semibold ${depthType === item.key ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-700"}`}
+                  onClick={() => setDepthType(item.key as DepthType)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
               <button
                 type="button"
-                className={`rounded-md px-3 py-1.5 text-sm font-semibold ${goalEditMode ? "bg-amber-600 text-white" : "bg-slate-200 text-slate-700"}`}
-                onClick={() => setGoalEditMode((prev) => !prev)}
+                className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
+                  comparePaneActive ? "border-indigo-400 bg-indigo-50 text-indigo-800" : "border-slate-300 text-slate-700"
+                }`}
+                onClick={() => {
+                  setCompareDraftGoalActual(compareSavedGoalActual);
+                  setCompareDraftCrms(compareSavedCrms);
+                  setShowCompareModal(true);
+                }}
               >
-                목표 편집 {goalEditMode ? "ON" : "OFF"}
+                같이보기
               </button>
-            ) : null}
-            <span className="mx-1 h-6 w-px bg-slate-300" />
-            {[
-              { key: "AR", label: "AR" },
-              { key: "AP", label: "AP" },
-              { key: "OP_COST", label: "부서운영비" },
-              { key: "PROFIT", label: "영업이익" },
-            ].map((item) => (
               <button
-                key={item.key}
                 type="button"
-                className={`rounded-md px-3 py-1.5 text-sm font-semibold ${depthType === item.key ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-700"}`}
-                onClick={() => setDepthType(item.key as DepthType)}
+                className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700"
+                onClick={() => setShowColumnSetting(true)}
               >
-                {item.label}
+                항목 설정
               </button>
-            ))}
-            <span className="mx-1 h-6 w-px bg-slate-300" />
-            <button type="button" className="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-semibold text-white" onClick={() => setShowAdd(true)}>
-              행 추가
-            </button>
-            <button
-              type="button"
-              disabled={saving || Object.keys(dirty).length === 0}
-              className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-emerald-300"
-              onClick={saveChanges}
-            >
-              {saving ? "저장 중..." : `저장 (${Object.keys(dirty).length})`}
-            </button>
-            <button
-              type="button"
-              className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700"
-              onClick={() => setShowColumnSetting(true)}
-            >
-              항목 설정
-            </button>
+              <button type="button" className="rounded-md bg-slate-800 px-3 py-1.5 text-sm font-semibold text-white" onClick={() => setShowAdd(true)}>
+                행 추가
+              </button>
+              <button
+                type="button"
+                disabled={saving || Object.keys(dirty).length === 0}
+                className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:bg-emerald-300"
+                onClick={saveChanges}
+              >
+                {saving ? "저장 중..." : `저장 (${Object.keys(dirty).length})`}
+              </button>
+            </div>
           </div>
 
           <div
@@ -1068,7 +1293,12 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
               setHoverColKey(null);
             }}
           >
-            <table className="w-max text-[11px] leading-tight">
+            {metaLoading ? (
+              <div className="flex h-full items-center justify-center bg-slate-50 text-sm text-slate-500">
+                항목 설정 불러오는 중...
+              </div>
+            ) : (
+              <table className="w-max text-[11px] leading-tight">
               <thead className="bg-slate-100" onMouseEnter={() => setHoverPnlSeq(null)}>
                 <tr>
                   {visibleBaseColumns.map((column) => (
@@ -1099,19 +1329,27 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                       {column.label}
                     </th>
                   ))}
-                  {visibleMonthKeys.map((key) => (
+                  {comparePaneActive ? (
+                    <th
+                      className="sticky top-0 z-[42] border-b border-r border-l-2 border-l-slate-400 border-slate-200 bg-slate-100 px-1 py-1 text-center text-[10px] font-semibold text-slate-700 shadow-[2px_0_6px_rgba(15,23,42,0.1)]"
+                      style={{ left: compareLabelLeft, minWidth: compareLabelColW, width: compareLabelColW }}
+                    >
+                      구분
+                    </th>
+                  ) : null}
+                  {visibleMonthKeys.map((key, monthColIdx) => (
                     <th
                       key={key}
                       onMouseEnter={() => setHoverColKey(key)}
                       className={`sticky top-0 z-40 border-b border-slate-200 px-1.5 py-1 text-right font-semibold text-slate-700 ${
-                        hoverColKey === key ? "!bg-sky-100" : "bg-slate-100"
-                      }`}
+                        !comparePaneActive && monthColIdx === 0 ? "border-l-2 border-l-slate-400" : ""
+                      } ${hoverColKey === key ? "!bg-sky-100" : "bg-slate-100"}`}
                       style={{ minWidth: monthColWidth, width: monthColWidth }}
                     >
                       {Number(String(key).slice(-2))}월 {monthHeaderSuffix}
                     </th>
                   ))}
-                  {showOrderActions ? (
+                  {showOrderActionsEffective ? (
                     <>
                       <th
                         onMouseEnter={() => setHoverColKey(PNL_COL_SORT)}
@@ -1191,14 +1429,55 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                   const monthPnlDisabled =
                     (!canEditGoal && viewTab === "goal") ||
                     row.row_type === "SUBTOTAL" ||
-                    (eligibleTotalPartialGoal && viewTab === "actual");
+                    (eligibleTotalPartialGoal && viewTab === "actual") ||
+                    comparePaneActive;
+                  const layers = compareLayersForRow(row);
+                  const subCount = layers.length;
+                  const readOnlyGrid = comparePaneActive;
+                  const useRowSpan = comparePaneActive && subCount > 1;
+                  const tripleCrms = comparePaneActive && subCount === 3;
+                  const dualTabCrms =
+                    comparePaneActive && subCount === 2 && layers[0]?.kind === "tab" && layers[1]?.kind === "crms";
+                  const orderColRowSpan = useRowSpan ? subCount : undefined;
                   return (
+                    <Fragment key={row.pnl_seq}>
+                      {layers.map((layer, si) => {
+                        const isFirst = si === 0;
+                        const subBorder = si === 0 ? "border-t border-slate-200" : "border-t border-slate-100";
+                        const subEnd =
+                          comparePaneActive && subCount > 1 && si === subCount - 1 ? "border-b-2 border-slate-300" : "";
+                        return (
                     <tr
-                      key={row.pnl_seq}
+                      key={`${row.pnl_seq}-${si}`}
                       onMouseEnter={() => setHoverPnlSeq(row.pnl_seq)}
-                      className={`border-t border-slate-200 ${styleByType} ${estimateAmountHighlight ? estimateCls : toneDown}`}
+                      className={`${subBorder} ${subEnd} ${styleByType} ${estimateAmountHighlight ? estimateCls : toneDown}`}
                     >
-                      {visibleBaseColumns.map((column) => {
+                      {(() => {
+                        if (!isFirst && useRowSpan && layer.kind === "crms") {
+                          const useTrioSpan =
+                            (tripleCrms || dualTabCrms) && compareBaseSplit.trioColSpan > 0;
+                          const trioSpan = useTrioSpan ? compareBaseSplit.trioColSpan : visibleBaseColumns.length;
+                          return (
+                            <td
+                              key={`${row.pnl_seq}-crms-base-span`}
+                              colSpan={trioSpan}
+                              className={`border-r border-slate-200 px-2 py-0.5 text-left align-middle text-[10px] text-slate-800 ${styleByType}${crosshairShade(rowHi, false)}`}
+                            >
+                              <span className="font-semibold">
+                                {row.row_label ?? row.row_code} : CRMS합계 {withComma(crmsSheet[row.pnl_seq]?.yearSum ?? 0)}
+                              </span>
+                            </td>
+                          );
+                        }
+                        return visibleBaseColumns.map((column) => {
+                        if (!isFirst && useRowSpan) return null;
+                        const inTrio = compareBaseSplit.trio.some((t) => t.key === column.key);
+                        let rs: number | undefined;
+                        if (comparePaneActive && subCount > 1) {
+                          if (tripleCrms) rs = inTrio ? 2 : 3;
+                          else if (dualTabCrms) rs = inTrio ? 1 : 2;
+                          else rs = subCount;
+                        }
                         const isSticky = stickyKeyOrder.includes(column.key);
                         const colHi = hoverColKey === column.key;
                         const tdClass = `${isSticky ? "px-0" : "px-1.5"} py-0.5 ${isSticky ? `sticky ${rowHi ? "z-[36]" : "z-[35]"} border-r border-slate-200 shadow-[1px_0_0_0_rgba(226,232,240,0.9)]` : ""} ${styleByType}${crosshairShade(rowHi, colHi)}`;
@@ -1215,7 +1494,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                         if (textCols.includes(column.key as (typeof textCols)[number])) {
                           return (
                             <td
-                              key={`${row.pnl_seq}-${column.key}`}
+                              key={`${row.pnl_seq}-${column.key}-${si}`}
+                              rowSpan={rs}
                               className={`${tdClass} text-center`}
                               style={tdStyle}
                               onMouseEnter={() => setHoverColKey(column.key)}
@@ -1223,7 +1503,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                               <input
                                 value={String(row[column.key] ?? "")}
                                 onChange={(e) => patchRow(row.pnl_seq, { [column.key]: e.target.value } as Partial<PnlRow>)}
-                                disabled={!canEditGoal && viewTab === "goal"}
+                                disabled={(!canEditGoal && viewTab === "goal") || readOnlyGrid}
                                 onMouseEnter={() => {
                                   setHoverPnlSeq(row.pnl_seq);
                                   setHoverColKey(column.key);
@@ -1246,7 +1526,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                             <input
                               value={withComma(row.company_target)}
                               onChange={(e) => patchRow(row.pnl_seq, { company_target: toNumber(e.target.value) })}
-                              disabled={!canEditGoal && viewTab === "goal"}
+                              disabled={(!canEditGoal && viewTab === "goal") || readOnlyGrid}
                               onMouseEnter={() => {
                                 setHoverPnlSeq(row.pnl_seq);
                                 setHoverColKey("company_target");
@@ -1263,7 +1543,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
 
                         return (
                           <td
-                            key={`${row.pnl_seq}-${column.key}`}
+                            key={`${row.pnl_seq}-${column.key}-${si}`}
+                            rowSpan={rs}
                             className={`${tdClass} text-right ${estimateCls}`}
                             style={tdStyle}
                             onMouseEnter={() => setHoverColKey(column.key)}
@@ -1271,25 +1552,100 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                             {cellMap[column.key] ?? ""}
                           </td>
                         );
-                      })}
+                      });
+                      })()}
+
+                      {comparePaneActive ? (
+                        <td
+                          style={{
+                            left: compareLabelLeft,
+                            minWidth: compareLabelColW,
+                            width: compareLabelColW,
+                          }}
+                          className={`sticky z-[42] whitespace-nowrap border-r border-l-2 border-l-slate-400 border-slate-200 px-0.5 py-0.5 text-center align-middle text-[10px] font-semibold text-slate-700 shadow-[2px_0_6px_rgba(15,23,42,0.1)] ${styleByType}${crosshairShade(rowHi, false)}`}
+                        >
+                          {layer.label}
+                        </td>
+                      ) : null}
 
                       {visibleMonthKeys.map((key, monthIdx) => {
+                        const { goalKey, actualKey, monthNum } = monthPairFromVisibleKey(key);
+                        const calMonthIdx = monthNum - 1;
+                        const auditKey = layer.kind === "goal" ? goalKey : layer.kind === "actual" ? actualKey : key;
                         const colHiMonth = hoverColKey === key;
                         const isActualTab = viewTab === "actual";
                         const placeholderGoal =
-                          isActualTab && toNumber(row[key]) === 0 ? withComma(row[goalKeys[monthIdx]]) : "";
+                          isActualTab && toNumber(row[key]) === 0 ? withComma(row[goalKey]) : "";
                         const monthFocused =
-                          monthEditFocus?.pnlSeq === row.pnl_seq && monthEditFocus?.key === key;
-                        const monthDisplayValue = monthFocused ? monthEditDraft : withComma(row[key]);
+                          !readOnlyGrid &&
+                          monthEditFocus?.pnlSeq === row.pnl_seq &&
+                          monthEditFocus?.key === auditKey;
+                        const valForLayer =
+                          layer.kind === "goal"
+                            ? toNumber(row[goalKey])
+                            : layer.kind === "actual"
+                              ? toNumber(row[actualKey])
+                              : toNumber(row[key]);
+                        const monthDisplayValue = monthFocused ? monthEditDraft : withComma(valForLayer);
+                        const monthCellDone = isPnlCellCompleted(row, auditKey);
+                        const cellNoteKey = cellNoteFlagKey(row.pnl_seq, auditKey);
+                        const hasCellNotes = Boolean(cellNoteFlags[cellNoteKey]);
+                        const hasCellHistory = Boolean(cellHistoryFlags[cellNoteKey]);
+                        const monthLeftRule =
+                          !comparePaneActive && monthIdx === 0 ? "border-l-2 border-l-slate-400" : "";
                         return (
                           <td
-                            key={`${row.pnl_seq}-${key}`}
-                            className={`relative ${rowHi ? "z-[1]" : "z-0"} px-1.5 py-0.5 text-right ${styleByType}${crosshairShade(rowHi, colHiMonth)}`}
+                            key={`${row.pnl_seq}-${key}-${si}`}
+                            className={`relative ${rowHi ? "z-[1]" : "z-0"} px-1.5 py-0.5 text-right ${monthLeftRule} ${styleByType}${crosshairShade(rowHi, colHiMonth)}`}
                             onMouseEnter={() => setHoverColKey(key)}
+                            onMouseDown={(e) => {
+                              if (e.button === 2) e.preventDefault();
+                            }}
+                            onContextMenu={(e) => {
+                              if (layer.kind === "crms" || readOnlyGrid) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              cellAuditRef.current?.openContextMenu(e, buildCellAuditPayload(row, auditKey, calMonthIdx));
+                            }}
                           >
+                            {layer.kind === "crms" ? (
+                              (() => {
+                                const cx = crmsSheet[row.pnl_seq]?.months[String(monthNum)] ?? null;
+                                if (!cx) return <span className="text-slate-400">—</span>;
+                                const tip = [cx.col_detail, cx.col_category, cx.col_code, cx.col_client, cx.col_item]
+                                  .filter(Boolean)
+                                  .join(" · ");
+                                return (
+                                  <span className="tabular-nums font-medium text-slate-900" title={tip || undefined}>
+                                    {withComma(cx.amount)}
+                                  </span>
+                                );
+                              })()
+                            ) : (
+                              <>
+                            {hasCellHistory ? (
+                              <span
+                                className="pointer-events-none absolute left-0 top-0 z-[2] border-r-[6px] border-r-transparent border-t-[6px] border-t-emerald-600 drop-shadow-[0_0_1px_rgba(0,0,0,0.35)]"
+                                title="타임라인 이력 있음"
+                                aria-hidden
+                              />
+                            ) : null}
+                            {hasCellNotes ? (
+                              <span
+                                className="pointer-events-none absolute right-0 top-0 z-[2] border-l-[6px] border-l-transparent border-t-[6px] border-t-red-500 drop-shadow-[0_0_1px_rgba(0,0,0,0.35)]"
+                                title="비고 있음"
+                                aria-hidden
+                              />
+                            ) : null}
                             <input
                                 value={monthDisplayValue}
                                 placeholder={placeholderGoal}
+                                onContextMenu={(e) => {
+                                  if (layer.kind === "crms" || readOnlyGrid) return;
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  cellAuditRef.current?.openContextMenu(e, buildCellAuditPayload(row, auditKey, calMonthIdx));
+                                }}
                                 onMouseEnter={() => {
                                   setHoverPnlSeq(row.pnl_seq);
                                   setHoverColKey(key);
@@ -1301,8 +1657,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                                   // 표시값이 콤마 포함(withComma) → 포커스 직후 숫자만(draft)으로 바뀌므로,
                                   // 비동기 select()는 리렌더 전에 돌아 선택이 무효화됨 → TAB 후 첫 입력이 덧붙음.
                                   flushSync(() => {
-                                    setMonthEditFocus({ pnlSeq: row.pnl_seq, key });
-                                    setMonthEditDraft(String(Math.trunc(toNumber(row[key]))));
+                                    setMonthEditFocus({ pnlSeq: row.pnl_seq, key: auditKey });
+                                    setMonthEditDraft(String(Math.trunc(valForLayer)));
                                   });
                                   if (!el.disabled && document.activeElement === el) el.select();
                                   requestAnimationFrame(() => {
@@ -1345,51 +1701,56 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                                   const digitsOnly = e.target.value.replace(/\D/g, "");
                                   if (monthFocused) setMonthEditDraft(digitsOnly);
                                   const v = toNumber(digitsOnly);
-                                  if (eligibleTotalPartialGoal && viewTab === "goal" && goalKeys.includes(key)) {
+                                  if (eligibleTotalPartialGoal && viewTab === "goal" && goalKeys.includes(auditKey)) {
                                     if (row.calc_mode !== "MANUAL_OVERRIDE") {
                                       const patch: Partial<PnlRow> = { calc_mode: "MANUAL_OVERRIDE" };
                                       for (const gk of goalKeys) (patch as Record<string, number>)[gk] = toNumber(row[gk]);
-                                      (patch as Record<string, number>)[key] = v;
+                                      (patch as Record<string, number>)[auditKey] = v;
                                       patchRow(row.pnl_seq, patch);
                                     } else {
-                                      patchRow(row.pnl_seq, { [key]: v } as Partial<PnlRow>);
+                                      patchRow(row.pnl_seq, { [auditKey]: v } as Partial<PnlRow>);
                                     }
                                     return;
                                   }
                                   if (
                                     row.row_type === "AMT_CALC" &&
                                     row.calc_mode !== "MANUAL_OVERRIDE" &&
-                                    ((viewTab === "actual" && actualKeys.includes(key)) ||
+                                    ((viewTab === "actual" && actualKeys.includes(auditKey)) ||
                                       (viewTab === "goal" &&
-                                        goalKeys.includes(key) &&
+                                        goalKeys.includes(auditKey) &&
                                         isOverrideAllowed(row, policyByCode)))
                                   ) {
                                     const patch: Partial<PnlRow> = { calc_mode: "MANUAL_OVERRIDE" };
                                     for (const gk of goalKeys) (patch as Record<string, number>)[gk] = toNumber(row[gk]);
                                     for (const ak of actualKeys) (patch as Record<string, number>)[ak] = toNumber(row[ak]);
-                                    (patch as Record<string, number>)[key] = v;
+                                    (patch as Record<string, number>)[auditKey] = v;
                                     patchRow(row.pnl_seq, patch);
                                     return;
                                   }
-                                  patchRow(row.pnl_seq, { [key]: v } as Partial<PnlRow>);
+                                  patchRow(row.pnl_seq, { [auditKey]: v } as Partial<PnlRow>);
                                 }}
                                 disabled={monthPnlDisabled}
                                 className={`w-full text-right text-[11px] outline-none placeholder:text-slate-400 ${
-                                  estimateAmountHighlight
-                                    ? "font-bold bg-transparent text-red-600 disabled:text-red-400"
-                                    : isSummary
-                                      ? `bg-transparent ${viewTab === "actual" ? "text-slate-600" : "text-slate-800"}`
-                                      : viewTab === "actual"
-                                        ? "bg-transparent text-slate-600"
-                                        : "bg-transparent text-slate-800"
+                                  monthCellDone
+                                    ? "bg-transparent font-semibold text-blue-600 disabled:text-blue-400"
+                                    : estimateAmountHighlight
+                                      ? "font-bold bg-transparent text-red-600 disabled:text-red-400"
+                                      : isSummary
+                                        ? `bg-transparent ${viewTab === "actual" ? "text-slate-600" : "text-slate-800"}`
+                                        : viewTab === "actual"
+                                          ? "bg-transparent text-slate-600"
+                                          : "bg-transparent text-slate-800"
                                 }`}
                               />
+                            </>
+                            )}
                           </td>
                         );
                       })}
-                      {showOrderActions ? (
+                      {showOrderActionsEffective && isFirst ? (
                         <>
                           <td
+                            rowSpan={orderColRowSpan}
                             className={`px-1 py-0.5 text-center ${styleByType}${crosshairShade(rowHi, hoverColKey === PNL_COL_SORT)}`}
                             onMouseEnter={() => setHoverColKey(PNL_COL_SORT)}
                           >
@@ -1415,6 +1776,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                             </div>
                           </td>
                           <td
+                            rowSpan={orderColRowSpan}
                             className={`px-1 py-0.5 text-center ${styleByType}${crosshairShade(rowHi, hoverColKey === PNL_COL_ACTIONS)}`}
                             onMouseEnter={() => setHoverColKey(PNL_COL_ACTIONS)}
                           >
@@ -1438,6 +1800,9 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                         </>
                       ) : null}
                     </tr>
+                        );
+                      })}
+                    </Fragment>
                   );
                   });
                 })()}
@@ -1449,7 +1814,8 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                   </tr>
                 ) : null}
               </tbody>
-            </table>
+              </table>
+            )}
           </div>
         </>
       )}
@@ -1673,6 +2039,52 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
             <div className="mt-4 flex justify-end gap-2">
               <button type="button" className="rounded border border-slate-300 px-3 py-1.5 text-sm" onClick={() => setShowColumnSetting(false)}>취소</button>
               <button type="button" className="rounded bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white" onClick={saveColumnSetting}>저장</button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showCompareModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={() => setShowCompareModal(false)}>
+          <div className="w-full max-w-md rounded-lg bg-white p-4 shadow-lg" onClick={(e) => e.stopPropagation()}>
+            <h3 className="mb-3 text-base font-bold text-slate-900">같이보기</h3>
+            <div className="space-y-2 text-sm text-slate-800">
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={compareDraftGoalActual}
+                  onChange={(e) => setCompareDraftGoalActual(e.target.checked)}
+                />
+                실적/목표 같이보기
+              </label>
+              <label className="flex cursor-pointer items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={compareDraftCrms}
+                  onChange={(e) => setCompareDraftCrms(e.target.checked)}
+                />
+                CRMS 같이보기
+              </label>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm"
+                onClick={() => setShowCompareModal(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className="rounded bg-slate-900 px-3 py-1.5 text-sm font-semibold text-white"
+                onClick={() => {
+                  setCompareSavedGoalActual(compareDraftGoalActual);
+                  setCompareSavedCrms(compareDraftCrms);
+                  setShowCompareModal(false);
+                }}
+              >
+                저장
+              </button>
             </div>
           </div>
         </div>

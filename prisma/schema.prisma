@@ -328,13 +328,69 @@ model PnlMaster {
   a_m12             Decimal  @default(0) @db.Decimal(18, 0)
   /// 실적 월(a_m01~a_m12) 중 DB값이 0이어도 목표로 채우지 않을 월 — CSV (예: a_m01,a_m03). 저장 후 새로고침 시에도 유지
   actual_explicit_months String? @db.VarChar(400)
+  /// 월별 셀 완료 표시 JSON — 예: { "t_m04": "COMPLETED", "a_m04": "COMPLETED" }
+  cell_completion       Json?
 
   source_note       String?
   created_at        DateTime @default(now())
   updated_at        DateTime @updatedAt
 
+  cellNotes         PnlCellNote[]
+  cellHistories     PnlCellHistory[]
+  crmsMappings      PnlCrmsMapping[]
+
   @@index([base_year, pnl_type], map: "IX_TB_PNL_MASTER_YEAR_TYPE")
   @@map("TB_PNL_MASTER")
+}
+
+/// 손익 행 ↔ CRMS(매출 AR / 매입 AP) 전표 — 같은 월에 여러 전표 매핑 가능(합계 표시)
+model PnlCrmsMapping {
+  map_seq     Int      @id @default(autoincrement())
+  pnl_seq     Int
+  /// 매핑 대상 월(1~12)
+  target_month Int
+  crms_module String   @db.VarChar(10) // AR | AP
+  source_seq  Int
+  created_at  DateTime @default(now())
+
+  pnl PnlMaster @relation(fields: [pnl_seq], references: [pnl_seq], onDelete: Cascade)
+
+  @@unique([pnl_seq, target_month, crms_module, source_seq], map: "UQ_TB_PNL_CRMS_MAP_ENTRY")
+  @@index([crms_module, source_seq], map: "IX_TB_PNL_CRMS_MAP_SRC")
+  @@map("TB_PNL_CRMS_MAPPING")
+}
+
+/// 손익 그리드 셀(행+월 키) 비고 스레드
+model PnlCellNote {
+  note_seq   Int      @id @default(autoincrement())
+  pnl_seq    Int
+  cell_key   String   @db.VarChar(10) // t_m01~t_m12, a_m01~a_m12
+  content    String   @db.Text
+  author     String   @db.VarChar(100)
+  created_at DateTime @default(now())
+  /// 소프트 삭제 — 내용 유지, UI에서 취소선 처리
+  deleted_at DateTime?
+
+  pnl PnlMaster @relation(fields: [pnl_seq], references: [pnl_seq], onDelete: Cascade)
+
+  @@index([pnl_seq, cell_key, created_at(sort: Desc)], map: "IX_TB_PNL_CELL_NOTE_ROW_KEY")
+  @@map("TB_PNL_CELL_NOTE")
+}
+
+/// 손익 그리드 셀 값 변경 타임라인(금액·개수 등)
+model PnlCellHistory {
+  history_seq Int      @id @default(autoincrement())
+  pnl_seq     Int
+  cell_key    String   @db.VarChar(10)
+  old_value   String?  @db.VarChar(100)
+  new_value   String?  @db.VarChar(100)
+  author      String   @db.VarChar(100)
+  created_at  DateTime @default(now())
+
+  pnl PnlMaster @relation(fields: [pnl_seq], references: [pnl_seq], onDelete: Cascade)
+
+  @@index([pnl_seq, cell_key, created_at(sort: Desc)], map: "IX_TB_PNL_CELL_HIST_ROW_KEY")
+  @@map("TB_PNL_CELL_HISTORY")
 }
 
 model PnlColumnPreference {

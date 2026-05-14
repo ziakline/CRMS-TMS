@@ -132,9 +132,9 @@ export default async function ArManagementPage({ searchParams }: ArManagementPag
   const groupEntries = Object.entries(groupedRows);
 
   return (
-    <div className="flex min-h-screen bg-slate-100">
+    <div className="flex min-h-screen min-w-0 overflow-x-hidden bg-slate-100">
       <Sidebar userName={session.user.name ?? "사용자"} />
-      <main className="flex-1 p-6 md:p-10">
+      <main className="min-w-0 flex-1 overflow-x-hidden p-6 md:p-10">
         <header className="mb-6 flex items-center justify-between gap-4">
           <h1 className="text-2xl font-bold text-slate-900">매출 관리 (AR)</h1>
           <div className="flex items-center gap-3">

@@ -1,4 +1,55 @@
 import { prisma } from "./prisma";
+import { formatKstDateTime } from "./time";
+
+function laterDate(a: Date | null | undefined, b: Date | null | undefined): Date | null {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return a.getTime() >= b.getTime() ? a : b;
+}
+
+/** 대시보드 AR/AP 카드용 — 해당 연도 전표 기준 DB 반영 시각(BAT·크롤러가 행을 갱신하면 updated_at 상승) */
+export async function getDashboardModuleSyncLabels(selectedYear: number): Promise<{ ar: string; ap: string }> {
+  const issueDtWhere = {
+    gte: new Date(Date.UTC(selectedYear, 0, 1)),
+    lt: new Date(Date.UTC(selectedYear + 1, 0, 1)),
+  };
+  const manualWhere = { change_dt: issueDtWhere };
+
+  const [arAgg, apAgg, syncEnd, manualRow] = await Promise.all([
+    prisma.ar.aggregate({
+      where: { is_deleted: "N", issue_dt: issueDtWhere },
+      _max: { updated_at: true, created_at: true },
+    }),
+    prisma.ap.aggregate({
+      where: { is_deleted: "N", issue_dt: issueDtWhere },
+      _max: { updated_at: true, created_at: true },
+    }),
+    prisma.syncLog.findFirst({
+      where: { end_dt: { not: null } },
+      orderBy: { end_dt: "desc" },
+      select: { end_dt: true },
+    }),
+    prisma.manualHistory.findFirst({
+      where: manualWhere,
+      orderBy: { change_dt: "desc" },
+      select: { change_dt: true },
+    }),
+  ]);
+
+  const syncDt = syncEnd?.end_dt ?? null;
+  const manualDt = manualRow?.change_dt ?? null;
+
+  const arTouch = laterDate(arAgg._max.updated_at ?? undefined, arAgg._max.created_at ?? undefined);
+  const apTouch = laterDate(apAgg._max.updated_at ?? undefined, apAgg._max.created_at ?? undefined);
+
+  const arLatest = arTouch ?? syncDt ?? manualDt;
+  const apLatest = apTouch ?? syncDt ?? manualDt;
+
+  return {
+    ar: arLatest ? formatKstDateTime(arLatest) : "-",
+    ap: apLatest ? formatKstDateTime(apLatest) : "-",
+  };
+}
 
 type DashboardMetric = {
   total_amount: number;

@@ -14,9 +14,9 @@ export default async function FinancePlaceholderPage({
   if (!session?.user?.email) redirect("/login");
 
   return (
-    <div className="flex min-h-screen bg-slate-100">
+    <div className="flex min-h-screen min-w-0 overflow-x-hidden bg-slate-100">
       <Sidebar userName={session.user.name ?? "사용자"} />
-      <main className="flex-1 p-6 md:p-10">
+      <main className="min-w-0 flex-1 overflow-x-hidden p-6 md:p-10">
         <section className="rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
           <h1 className="text-2xl font-bold text-slate-900">{title}</h1>
           <div className="mt-4 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-sm text-slate-500">

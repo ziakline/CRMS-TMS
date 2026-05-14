@@ -1,4 +1,5 @@
 import { getServerSession } from "next-auth";
+import { Prisma } from "@prisma/client";
 import { authOptions } from "../../../lib/auth-options";
 import { prisma } from "../../../lib/prisma";
 
@@ -14,6 +15,19 @@ function explicitMonthsPatch(item: Record<string, unknown>): { actual_explicit_m
   if (v === null) return { actual_explicit_months: null };
   const s = String(v ?? "").trim();
   return { actual_explicit_months: s || null };
+}
+
+const TRACKED_CELL_HISTORY_KEYS: string[] = [
+  ...Array.from({ length: 12 }, (_, i) => `t_m${String(i + 1).padStart(2, "0")}`),
+  ...Array.from({ length: 12 }, (_, i) => `a_m${String(i + 1).padStart(2, "0")}`),
+  "company_target",
+  "prev_year_actual",
+];
+
+function numFromDbCell(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  const n = Number(value as string | number);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /** `feePolicy.findMany` 결과 — prisma가 동적 캐스팅이라 배열에 타입을 붙여 map 콜백의 implicit any 방지 */
@@ -274,57 +288,92 @@ export async function PUT(request: Request) {
     return Response.json({ message: "저장할 변경사항이 없습니다." }, { status: 400 });
   }
 
-  await prisma.$transaction(
-    updates.map((item: Record<string, unknown>) =>
-      prisma.pnlMaster.update({
-        where: { pnl_seq: toNumber(item.pnl_seq) },
+  const author = session.user?.name?.trim() || session.user?.email || "unknown";
+
+  await prisma.$transaction(async (tx) => {
+    for (const item of updates) {
+      const itemObj = item as Record<string, unknown>;
+      const pnl_seq = toNumber(itemObj.pnl_seq);
+      const before = await tx.pnlMaster.findUnique({ where: { pnl_seq } });
+      if (!before) continue;
+
+      for (const key of TRACKED_CELL_HISTORY_KEYS) {
+        if (!(key in itemObj)) continue;
+        const oldV = numFromDbCell(before[key as keyof typeof before]);
+        const newV = toNumber(itemObj[key]);
+        if (oldV !== newV) {
+          await tx.pnlCellHistory.create({
+            data: {
+              pnl_seq,
+              cell_key: key,
+              old_value: String(oldV),
+              new_value: String(newV),
+              author,
+            },
+          });
+        }
+      }
+
+      const completionPatch =
+        "cell_completion" in itemObj
+          ? {
+              cell_completion:
+                itemObj.cell_completion === null || itemObj.cell_completion === undefined
+                  ? Prisma.DbNull
+                  : (itemObj.cell_completion as Prisma.InputJsonValue),
+            }
+          : {};
+
+      await tx.pnlMaster.update({
+        where: { pnl_seq },
         data: {
-          grade: (item.grade as string) || null,
-          category1: (item.category1 as string) || null,
-          category2: (item.category2 as string) || null,
-          category3: (item.category3 as string) || null,
-          biz_detail: (item.biz_detail as string) || null,
-          biz_group: (item.biz_group as string) || null,
-          client_name: (item.client_name as string) || null,
-          row_label: (item.row_label as string) || null,
-          row_type: (item.row_type as string) || undefined,
-          sort_order: toNumber(item.sort_order),
-          company_target: toNumber(item.company_target),
-          calc_mode: (item.calc_mode as string) || "AUTO",
-          formula_targets: (item.formula_targets as string) || null,
-          ref_qty_row_code: (item.ref_qty_row_code as string) || null,
-          ref_unit_price_cd: (item.ref_unit_price_cd as string) || null,
-          promo_apply_actual: Boolean(item.promo_apply_actual),
-          vat_included_price: Boolean(item.vat_included_price),
-          t_m01: toNumber(item.t_m01),
-          t_m02: toNumber(item.t_m02),
-          t_m03: toNumber(item.t_m03),
-          t_m04: toNumber(item.t_m04),
-          t_m05: toNumber(item.t_m05),
-          t_m06: toNumber(item.t_m06),
-          t_m07: toNumber(item.t_m07),
-          t_m08: toNumber(item.t_m08),
-          t_m09: toNumber(item.t_m09),
-          t_m10: toNumber(item.t_m10),
-          t_m11: toNumber(item.t_m11),
-          t_m12: toNumber(item.t_m12),
-          a_m01: toNumber(item.a_m01),
-          a_m02: toNumber(item.a_m02),
-          a_m03: toNumber(item.a_m03),
-          a_m04: toNumber(item.a_m04),
-          a_m05: toNumber(item.a_m05),
-          a_m06: toNumber(item.a_m06),
-          a_m07: toNumber(item.a_m07),
-          a_m08: toNumber(item.a_m08),
-          a_m09: toNumber(item.a_m09),
-          a_m10: toNumber(item.a_m10),
-          a_m11: toNumber(item.a_m11),
-          a_m12: toNumber(item.a_m12),
-          ...explicitMonthsPatch(item),
+          grade: (itemObj.grade as string) || null,
+          category1: (itemObj.category1 as string) || null,
+          category2: (itemObj.category2 as string) || null,
+          category3: (itemObj.category3 as string) || null,
+          biz_detail: (itemObj.biz_detail as string) || null,
+          biz_group: (itemObj.biz_group as string) || null,
+          client_name: (itemObj.client_name as string) || null,
+          row_label: (itemObj.row_label as string) || null,
+          row_type: (itemObj.row_type as string) || undefined,
+          sort_order: toNumber(itemObj.sort_order),
+          company_target: toNumber(itemObj.company_target),
+          calc_mode: (itemObj.calc_mode as string) || "AUTO",
+          formula_targets: (itemObj.formula_targets as string) || null,
+          ref_qty_row_code: (itemObj.ref_qty_row_code as string) || null,
+          ref_unit_price_cd: (itemObj.ref_unit_price_cd as string) || null,
+          promo_apply_actual: Boolean(itemObj.promo_apply_actual),
+          vat_included_price: Boolean(itemObj.vat_included_price),
+          t_m01: toNumber(itemObj.t_m01),
+          t_m02: toNumber(itemObj.t_m02),
+          t_m03: toNumber(itemObj.t_m03),
+          t_m04: toNumber(itemObj.t_m04),
+          t_m05: toNumber(itemObj.t_m05),
+          t_m06: toNumber(itemObj.t_m06),
+          t_m07: toNumber(itemObj.t_m07),
+          t_m08: toNumber(itemObj.t_m08),
+          t_m09: toNumber(itemObj.t_m09),
+          t_m10: toNumber(itemObj.t_m10),
+          t_m11: toNumber(itemObj.t_m11),
+          t_m12: toNumber(itemObj.t_m12),
+          a_m01: toNumber(itemObj.a_m01),
+          a_m02: toNumber(itemObj.a_m02),
+          a_m03: toNumber(itemObj.a_m03),
+          a_m04: toNumber(itemObj.a_m04),
+          a_m05: toNumber(itemObj.a_m05),
+          a_m06: toNumber(itemObj.a_m06),
+          a_m07: toNumber(itemObj.a_m07),
+          a_m08: toNumber(itemObj.a_m08),
+          a_m09: toNumber(itemObj.a_m09),
+          a_m10: toNumber(itemObj.a_m10),
+          a_m11: toNumber(itemObj.a_m11),
+          a_m12: toNumber(itemObj.a_m12),
+          ...explicitMonthsPatch(itemObj),
+          ...completionPatch,
         },
-      }),
-    ),
-  );
+      });
+    }
+  });
 
   return Response.json({ message: `${updates.length}건 저장되었습니다.` }, { status: 200 });
 }
