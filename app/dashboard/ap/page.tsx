@@ -5,8 +5,11 @@ import { Download } from "lucide-react";
 import HistoryTableRow, { type ChangeLogItem, type GridRowItem } from "../../../components/history-table-row";
 import { authOptions } from "../../../lib/auth-options";
 import { prisma } from "../../../lib/prisma";
+import ArApManagementSummary from "../_components/ar-ap-management-summary";
+import GroupedDetailsToggleButtons from "../_components/grouped-details-toggle-buttons";
 import Sidebar from "../_components/sidebar";
 import YearSelect from "../_components/year-select";
+import { getDashboardModuleSyncLabels } from "../../../lib/dashboard-stats";
 
 function toIsoString(value: Date | null) {
   return value ? value.toISOString() : null;
@@ -52,26 +55,30 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
     lt: new Date(Date.UTC(selectedYear + 1, 0, 1)),
   };
 
-  const apRows = await prisma.ap.findMany({
-    where: {
-      issue_dt: issueDtRange,
-    },
-    orderBy: { ap_seq: "asc" },
-    select: {
-      ap_seq: true,
-      source_id: true,
-      biz_group_nm: true,
-      issue_dt: true,
-      client_nm: true,
-      description: true,
-      amount: true,
-      pay_status: true,
-      inspect_title: true,
-      inspect_worker: true,
-      inspect_body: true,
-      inspect_excel: true,
-    },
-  });
+  const [apRows, syncLabels] = await Promise.all([
+    prisma.ap.findMany({
+      where: {
+        is_deleted: "N",
+        issue_dt: issueDtRange,
+      },
+      orderBy: { ap_seq: "asc" },
+      select: {
+        ap_seq: true,
+        source_id: true,
+        biz_group_nm: true,
+        issue_dt: true,
+        client_nm: true,
+        description: true,
+        amount: true,
+        pay_status: true,
+        inspect_title: true,
+        inspect_worker: true,
+        inspect_body: true,
+        inspect_excel: true,
+      },
+    }),
+    getDashboardModuleSyncLabels(selectedYear),
+  ]);
 
   const logs = await prisma.autoChangeLog.findMany({
     where: {
@@ -107,7 +114,20 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
   }, {});
   const todayKstKey = toKstDateKey(new Date());
 
-  const rows: GridRowItem[] = apRows.map((row) => ({
+  // source_id 중복 제거: 동일 source_id는 ap_seq가 가장 높은(최신) 레코드만 유지
+  const deduplicatedApRows = (() => {
+    const seen = new Map<string, typeof apRows[0]>();
+    for (const row of apRows) {
+      if (!row.source_id) continue;
+      const prev = seen.get(row.source_id);
+      if (!prev || row.ap_seq > prev.ap_seq) seen.set(row.source_id, row);
+    }
+    return apRows.filter(
+      (row) => !row.source_id || seen.get(row.source_id)?.ap_seq === row.ap_seq,
+    );
+  })();
+
+  const rows: GridRowItem[] = deduplicatedApRows.map((row) => ({
     row_id: row.ap_seq,
     source_id: row.source_id,
     target_desc: row.description,
@@ -130,14 +150,21 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
     return acc;
   }, {});
   const groupEntries = Object.entries(groupedRows);
+  const totalAmount = rows.reduce((sum, row) => sum + row.amount, 0);
+  const pendingAmount = rows
+    .filter((row) => row.inspect_status !== "완료" && row.inspect_status !== "진행")
+    .reduce((sum, row) => sum + row.amount, 0);
 
   return (
     <div className="flex min-h-screen min-w-0 overflow-x-hidden bg-slate-100">
       <Sidebar userName={session.user.name ?? "사용자"} />
       <main className="min-w-0 flex-1 overflow-x-hidden p-6 md:p-10">
-        <header className="mb-6 flex items-center justify-between gap-4">
-          <h1 className="text-2xl font-bold text-slate-900">매입 관리 (AP)</h1>
-          <div className="flex items-center gap-3">
+        <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
+          <div className="flex min-w-0 flex-wrap items-center gap-3">
+            <h1 className="shrink-0 text-2xl font-bold text-slate-900">매입 관리 (AP)</h1>
+            <GroupedDetailsToggleButtons sectionId="ap-group-details" />
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
             <YearSelect selectedYear={selectedYear} />
             <Link
               href="/api/export/ap"
@@ -149,7 +176,15 @@ export default async function ApManagementPage({ searchParams }: ApManagementPag
           </div>
         </header>
 
-        <section className="space-y-4">
+        <ArApManagementSummary
+          module="ap"
+          selectedYear={selectedYear}
+          totalAmount={totalAmount}
+          pendingAmount={pendingAmount}
+          latestSyncText={syncLabels.ap}
+        />
+
+        <section id="ap-group-details" className="space-y-4">
           {groupEntries.map(([groupName, groupRows]) => {
             const sortedGroupRows = [...groupRows].sort((a, b) => {
               if (!a.issue_dt && !b.issue_dt) return 0;

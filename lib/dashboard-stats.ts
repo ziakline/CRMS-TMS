@@ -121,20 +121,17 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
   const [arTotalAgg, arPendingAgg, arCompletedAgg, apTotalAgg, apPendingAgg, apCompletedAgg] =
     await Promise.all([
       prisma.ar.aggregate({
-        where: issueDtWhere ? { issue_dt: issueDtWhere } : undefined,
+        where: { is_deleted: "N", ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}) },
         _sum: { amount: true },
       }),
       prisma.ar.aggregate({
         where: {
+          is_deleted: "N",
           ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
           OR: [
             { claim_status: null },
             { claim_status: "" },
-            {
-              claim_status: {
-                contains: "대기",
-              },
-            },
+            { claim_status: { contains: "대기" } },
           ],
         },
         _count: { _all: true },
@@ -142,38 +139,28 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
       }),
       prisma.ar.aggregate({
         where: {
+          is_deleted: "N",
           ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
           OR: [
-            {
-              claim_status: {
-                contains: "완료",
-              },
-            },
-            {
-              claim_status: {
-                contains: "진행",
-              },
-            },
+            { claim_status: { contains: "완료" } },
+            { claim_status: { contains: "진행" } },
           ],
         },
         _count: { _all: true },
         _sum: { amount: true },
       }),
       prisma.ap.aggregate({
-        where: issueDtWhere ? { issue_dt: issueDtWhere } : undefined,
+        where: { is_deleted: "N", ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}) },
         _sum: { amount: true },
       }),
       prisma.ap.aggregate({
         where: {
+          is_deleted: "N",
           ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
           OR: [
             { pay_status: null },
             { pay_status: "" },
-            {
-              pay_status: {
-                contains: "대기",
-              },
-            },
+            { pay_status: { contains: "대기" } },
           ],
         },
         _count: { _all: true },
@@ -181,18 +168,11 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
       }),
       prisma.ap.aggregate({
         where: {
+          is_deleted: "N",
           ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
           OR: [
-            {
-              pay_status: {
-                contains: "완료",
-              },
-            },
-            {
-              pay_status: {
-                contains: "진행",
-              },
-            },
+            { pay_status: { contains: "완료" } },
+            { pay_status: { contains: "진행" } },
           ],
         },
         _count: { _all: true },
@@ -203,7 +183,7 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
   const [arGroupTotal, arGroupPending, apGroupTotal, apGroupPending] = await Promise.all([
     prisma.ar.groupBy({
       by: ["biz_group_nm"],
-      where: issueDtWhere ? { issue_dt: issueDtWhere } : undefined,
+      where: { is_deleted: "N", ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}) },
       _sum: { amount: true },
       _min: { ar_seq: true },
       orderBy: { _min: { ar_seq: "asc" } },
@@ -211,22 +191,19 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
     prisma.ar.groupBy({
       by: ["biz_group_nm"],
       where: {
+        is_deleted: "N",
         ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
         OR: [
           { claim_status: null },
           { claim_status: "" },
-          {
-            claim_status: {
-              contains: "대기",
-            },
-          },
+          { claim_status: { contains: "대기" } },
         ],
       },
       _sum: { amount: true },
     }),
     prisma.ap.groupBy({
       by: ["biz_group_nm"],
-      where: issueDtWhere ? { issue_dt: issueDtWhere } : undefined,
+      where: { is_deleted: "N", ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}) },
       _sum: { amount: true },
       _min: { ap_seq: true },
       orderBy: { _min: { ap_seq: "asc" } },
@@ -234,15 +211,12 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
     prisma.ap.groupBy({
       by: ["biz_group_nm"],
       where: {
+        is_deleted: "N",
         ...(issueDtWhere ? { issue_dt: issueDtWhere } : {}),
         OR: [
           { pay_status: null },
           { pay_status: "" },
-          {
-            pay_status: {
-              contains: "대기",
-            },
-          },
+          { pay_status: { contains: "대기" } },
         ],
       },
       _sum: { amount: true },
@@ -251,39 +225,19 @@ export async function getDashboardStats(selectedYear?: number): Promise<Dashboar
 
   const [arTodayAgg, arYesterdayAgg, apTodayAgg, apYesterdayAgg] = await Promise.all([
     prisma.ar.aggregate({
-      where: {
-        issue_dt: {
-          gte: todayRange.start,
-          lt: todayRange.end,
-        },
-      },
+      where: { is_deleted: "N", issue_dt: { gte: todayRange.start, lt: todayRange.end } },
       _sum: { amount: true },
     }),
     prisma.ar.aggregate({
-      where: {
-        issue_dt: {
-          gte: yesterdayRange.start,
-          lt: yesterdayRange.end,
-        },
-      },
+      where: { is_deleted: "N", issue_dt: { gte: yesterdayRange.start, lt: yesterdayRange.end } },
       _sum: { amount: true },
     }),
     prisma.ap.aggregate({
-      where: {
-        issue_dt: {
-          gte: todayRange.start,
-          lt: todayRange.end,
-        },
-      },
+      where: { is_deleted: "N", issue_dt: { gte: todayRange.start, lt: todayRange.end } },
       _sum: { amount: true },
     }),
     prisma.ap.aggregate({
-      where: {
-        issue_dt: {
-          gte: yesterdayRange.start,
-          lt: yesterdayRange.end,
-        },
-      },
+      where: { is_deleted: "N", issue_dt: { gte: yesterdayRange.start, lt: yesterdayRange.end } },
       _sum: { amount: true },
     }),
   ]);

@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { createPortal } from "react-dom";
 import {
   forwardRef,
@@ -567,28 +566,9 @@ export const PnlCellAuditHost = forwardRef<PnlCellAuditHostRef, Props>(function 
               <>
                 <div className="flex items-center justify-between gap-2 border-b border-slate-100 px-3 py-2">
                   <span className="text-sm font-semibold text-slate-800">교차검증 — {dialogTarget.monthLabel}</span>
-                  <div className="flex items-center gap-2">
-                    <Link
-                      href={(() => {
-                        const t = dialogTarget;
-                        const qs = new URLSearchParams({
-                          pnl_seq: String(t.pnl_seq),
-                          cell_key: t.cell_key,
-                        });
-                        if (mappingSheet) {
-                          qs.set("year", String(mappingSheet.year));
-                          qs.set("type", mappingSheet.pnlType);
-                        }
-                        return `/dashboard/finance/pnl-plan/crms-mapping?${qs.toString()}`;
-                      })()}
-                      className="text-[11px] text-blue-600 underline hover:text-blue-800"
-                    >
-                      사업그룹·항목 매핑
-                    </Link>
-                    <button type="button" className="rounded px-2 py-0.5 text-xs text-slate-500 hover:bg-slate-100" onClick={closeDialog}>
-                      닫기
-                    </button>
-                  </div>
+                  <button type="button" className="rounded px-2 py-0.5 text-xs text-slate-500 hover:bg-slate-100" onClick={closeDialog}>
+                    닫기
+                  </button>
                 </div>
                 <div className="overflow-x-auto p-2">
                   <table className="w-full min-w-[640px] border-collapse border border-slate-200 text-[11px]">
@@ -651,7 +631,7 @@ export const PnlCellAuditHost = forwardRef<PnlCellAuditHostRef, Props>(function 
                           </td>
                         ) : (
                           <td className="border border-slate-200 px-2 py-1 text-slate-500" colSpan={6}>
-                            CRMS 매핑이 없습니다. 우측 상단에서 사업그룹·항목 매핑을 저장해 주세요.
+                            CRMS 매핑이 없습니다. 손익계획 상단 「매핑」에서 사업그룹·항목을 연결해 주세요.
                           </td>
                         )}
                       </tr>

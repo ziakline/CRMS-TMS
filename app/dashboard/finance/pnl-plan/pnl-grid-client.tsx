@@ -380,15 +380,40 @@ function isTotalRowEligibleForPartialGoalOverride(
   });
 }
 
-export default function PnlGridClient({ initialYear }: { initialYear: number }) {
-  const [year, setYear] = useState(initialYear);
+export default function PnlGridClient({
+  initialYear,
+  crmsMappingBasePath = "/dashboard/finance/pnl-plan",
+  fixedDepthType,
+  externalYear,
+  externalViewTab,
+  hideTopBar = false,
+  onGrandTotalsComputed,
+  autoHeight,
+}: {
+  initialYear: number;
+  crmsMappingBasePath?: string;
+  /** 설정 시 해당 탭으로 고정, 탭 전환 버튼 숨김 */
+  fixedDepthType?: DepthType;
+  /** 외부에서 연도 제어 (통합 뷰 공유) */
+  externalYear?: number;
+  /** 외부에서 목표/실적 탭 제어 (통합 뷰 공유) */
+  externalViewTab?: ViewTab;
+  /** 상단 제목·연도·목표실적 버튼 행 숨김 (통합 뷰에서 1회만 표시) */
+  hideTopBar?: boolean;
+  /** GRAND_TOTAL 행의 월별 목표/실적 합계를 부모에게 전달 (크로스섹션 계산용) */
+  onGrandTotalsComputed?: (goalByMonth: number[], actualByMonth: number[]) => void;
+  /** 고정 높이 없이 모든 행을 펼쳐서 표시 (통합 뷰 연속 나열) */
+  autoHeight?: boolean;
+}) {
+  const [year, setYear] = useState(externalYear ?? initialYear);
   const yy = String(year).slice(-2);
   const prevYy = String(year - 1).slice(-2);
-  const [viewTab, setViewTab] = useState<ViewTab>("goal");
-  const [depthType, setDepthType] = useState<DepthType>("AR");
+  const [viewTab, setViewTab] = useState<ViewTab>(externalViewTab ?? "goal");
+  const [depthType, setDepthType] = useState<DepthType>(fixedDepthType ?? "AR");
   const [rows, setRows] = useState<PnlRow[]>([]);
   const [profitArRows, setProfitArRows] = useState<PnlRow[]>([]);
   const [profitApRows, setProfitApRows] = useState<PnlRow[]>([]);
+  const [profitOpRows, setProfitOpRows] = useState<PnlRow[]>([]);
   const [feeOptions, setFeeOptions] = useState<FeeOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -558,16 +583,23 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
 
   const loadProfitSources = async () => {
     try {
-      const [arRes, apRes] = await Promise.all([
+      const [arRes, apRes, opRes] = await Promise.all([
         fetch(`/api/pnl?year=${year}&type=AR`),
         fetch(`/api/pnl?year=${year}&type=AP`),
+        fetch(`/api/pnl?year=${year}&type=OP_COST`),
       ]);
-      const [arJson, apJson] = await Promise.all([readJsonSafe(arRes), readJsonSafe(apRes)]);
+      const [arJson, apJson, opJson] = await Promise.all([
+        readJsonSafe(arRes),
+        readJsonSafe(apRes),
+        readJsonSafe(opRes),
+      ]);
       setProfitArRows(Array.isArray(arJson.rows) ? (arJson.rows as PnlRow[]) : []);
       setProfitApRows(Array.isArray(apJson.rows) ? (apJson.rows as PnlRow[]) : []);
+      setProfitOpRows(Array.isArray(opJson.rows) ? (opJson.rows as PnlRow[]) : []);
     } catch {
       setProfitArRows([]);
       setProfitApRows([]);
+      setProfitOpRows([]);
     }
   };
 
@@ -605,11 +637,32 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
     void loadProfitSources();
   }, [year]);
 
+  // 외부 제어 sync — 통합 뷰(R2)에서 공유 year/viewTab을 각 섹션에 반영
+  useEffect(() => {
+    if (externalYear !== undefined) setYear(externalYear);
+  }, [externalYear]);
+  useEffect(() => {
+    if (externalViewTab !== undefined) setViewTab(externalViewTab);
+  }, [externalViewTab]);
+  useEffect(() => {
+    if (fixedDepthType !== undefined) setDepthType(fixedDepthType);
+  }, [fixedDepthType]);
+
   const effectiveRows = useMemo(() => {
     const sorted = [...rows].sort((a, b) => a.sort_order - b.sort_order);
     const byCode = new Map(sorted.map((row) => [row.row_code, row]));
-    const profitArByCode = new Map(profitArRows.map((row) => [row.row_code, row]));
-    const profitApByCode = new Map(profitApRows.map((row) => [row.row_code, row]));
+    // 합계할 행 풀: AR + OP_COST (+ 현재 섹션 rows) — formula_targets.ar 조회용
+    const profitArByCode = new Map([
+      ...profitArRows.map((row): [string, PnlRow] => [row.row_code, row]),
+      ...profitOpRows.map((row): [string, PnlRow] => [row.row_code, row]),
+      ...sorted.map((row): [string, PnlRow] => [row.row_code, row]),
+    ]);
+    // 차감할 행 풀: AP + OP_COST (+ 현재 섹션 rows) — formula_targets.ap 조회용
+    const profitApByCode = new Map([
+      ...profitApRows.map((row): [string, PnlRow] => [row.row_code, row]),
+      ...profitOpRows.map((row): [string, PnlRow] => [row.row_code, row]),
+      ...sorted.map((row): [string, PnlRow] => [row.row_code, row]),
+    ]);
     const policyByCode = new Map(feeOptions.map((item) => [item.code, item]));
     const cache = new Map<string, PnlRow>();
 
@@ -750,7 +803,26 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
     };
 
     return sorted.map(resolve);
-  }, [rows, feeOptions, year, profitArRows, profitApRows]);
+  }, [rows, feeOptions, year, profitArRows, profitApRows, profitOpRows]);
+
+  // GRAND_TOTAL 행의 월별 합계를 부모(크로스섹션 계산)에 전달
+  useEffect(() => {
+    if (!onGrandTotalsComputed) return;
+    const grandRows = effectiveRows.filter((r) => r.row_type === "GRAND_TOTAL");
+    if (grandRows.length === 0) {
+      // GRAND_TOTAL 없으면 TOTAL 행 합산
+      const totalRows = effectiveRows.filter((r) => r.row_type === "TOTAL");
+      if (totalRows.length === 0) return;
+      const goalByMonth = goalKeys.map((k) => totalRows.reduce((s, r) => s + toNumber(r[k]), 0));
+      const actualByMonth = actualKeys.map((k) => totalRows.reduce((s, r) => s + toNumber(r[k]), 0));
+      onGrandTotalsComputed(goalByMonth, actualByMonth);
+      return;
+    }
+    const goalByMonth = goalKeys.map((k) => grandRows.reduce((s, r) => s + toNumber(r[k]), 0));
+    const actualByMonth = actualKeys.map((k) => grandRows.reduce((s, r) => s + toNumber(r[k]), 0));
+    onGrandTotalsComputed(goalByMonth, actualByMonth);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveRows]);
 
   const patchRow = (pnlSeq: number, patch: Partial<PnlRow>) => {
     setRows((prev) => {
@@ -1167,57 +1239,59 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
         onCellNotesMutated={loadCellNoteFlags}
         mappingSheet={{ year, pnlType: depthType }}
       />
-      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <h1 className="text-2xl font-bold text-slate-900">{year}년 손익계획</h1>
-        <div className="flex flex-wrap items-center gap-2">
-          <select
-            value={year}
-            onChange={(e) => setYear(toNumber(e.target.value) || initialYear)}
-            className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
-          >
-            {yearOptions.map((option) => (
-              <option key={option} value={option}>
-                {option}년
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "goal" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
-            onClick={() => setViewTab("goal")}
-          >
-            목표
-          </button>
-          <button
-            type="button"
-            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "actual" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
-            onClick={() => {
-              setViewTab("actual");
-              setGoalEditMode(false);
-            }}
-          >
-            실적
-          </button>
-          <button
-            type="button"
-            disabled={viewTab !== "goal"}
-            title={viewTab !== "goal" ? "목표 탭에서만 사용할 수 있습니다." : undefined}
-            className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
-              viewTab !== "goal"
-                ? "cursor-not-allowed bg-slate-100 text-slate-400"
-                : goalEditMode
-                  ? "bg-amber-600 text-white"
-                  : "bg-slate-200 text-slate-700"
-            }`}
-            onClick={() => {
-              if (viewTab !== "goal") return;
-              setGoalEditMode((prev) => !prev);
-            }}
-          >
-            목표 편집 {goalEditMode ? "ON" : "OFF"}
-          </button>
+      {!hideTopBar && (
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <h1 className="text-2xl font-bold text-slate-900">{year}년 손익계획</h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={year}
+              onChange={(e) => setYear(toNumber(e.target.value) || initialYear)}
+              className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+            >
+              {yearOptions.map((option) => (
+                <option key={option} value={option}>
+                  {option}년
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "goal" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
+              onClick={() => setViewTab("goal")}
+            >
+              목표
+            </button>
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${viewTab === "actual" ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-700"}`}
+              onClick={() => {
+                setViewTab("actual");
+                setGoalEditMode(false);
+              }}
+            >
+              실적
+            </button>
+            <button
+              type="button"
+              disabled={viewTab !== "goal"}
+              title={viewTab !== "goal" ? "목표 탭에서만 사용할 수 있습니다." : undefined}
+              className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                viewTab !== "goal"
+                  ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                  : goalEditMode
+                    ? "bg-amber-600 text-white"
+                    : "bg-slate-200 text-slate-700"
+              }`}
+              onClick={() => {
+                if (viewTab !== "goal") return;
+                setGoalEditMode((prev) => !prev);
+              }}
+            >
+              목표 편집 {goalEditMode ? "ON" : "OFF"}
+            </button>
+          </div>
         </div>
-      </div>
+      )}
 
       {message ? <p className="text-sm text-slate-700">{message}</p> : null}
 
@@ -1235,23 +1309,57 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
         <>
           <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
             <div className="flex flex-wrap items-center gap-2">
-              {[
-                { key: "AR", label: "AR" },
-                { key: "AP", label: "AP" },
-                { key: "OP_COST", label: "부서운영비" },
-                { key: "PROFIT", label: "영업이익" },
-              ].map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`rounded-md px-3 py-1.5 text-sm font-semibold ${depthType === item.key ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-700"}`}
-                  onClick={() => setDepthType(item.key as DepthType)}
-                >
-                  {item.label}
-                </button>
-              ))}
+              {fixedDepthType ? (
+                <span className="text-base font-bold text-slate-800">
+                  {fixedDepthType === "AR" ? "AR (매출)" : fixedDepthType === "AP" ? "AP (매입)" : fixedDepthType === "OP_COST" ? "부서운영비" : "영업이익"}
+                </span>
+              ) : (
+                [
+                  { key: "AR", label: "AR" },
+                  { key: "AP", label: "AP" },
+                  { key: "OP_COST", label: "부서운영비" },
+                  { key: "PROFIT", label: "영업이익" },
+                ].map((item) => (
+                  <button
+                    key={item.key}
+                    type="button"
+                    className={`rounded-md px-3 py-1.5 text-sm font-semibold ${depthType === item.key ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-700"}`}
+                    onClick={() => setDepthType(item.key as DepthType)}
+                  >
+                    {item.label}
+                  </button>
+                ))
+              )}
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {hideTopBar && (
+                <button
+                  type="button"
+                  disabled={viewTab !== "goal"}
+                  title={viewTab !== "goal" ? "목표 탭에서만 사용할 수 있습니다." : undefined}
+                  className={`rounded-md px-3 py-1.5 text-sm font-semibold ${
+                    viewTab !== "goal"
+                      ? "cursor-not-allowed bg-slate-100 text-slate-400"
+                      : goalEditMode
+                        ? "bg-amber-600 text-white"
+                        : "bg-slate-200 text-slate-700"
+                  }`}
+                  onClick={() => {
+                    if (viewTab !== "goal") return;
+                    setGoalEditMode((prev) => !prev);
+                  }}
+                >
+                  목표 편집 {goalEditMode ? "ON" : "OFF"}
+                </button>
+              )}
+              {(depthType === "AR" || depthType === "AP") ? (
+                <a
+                  href={`${crmsMappingBasePath}/crms-mapping?base_year=${encodeURIComponent(String(year))}&pnl_type=${encodeURIComponent(depthType)}&view_tab=${encodeURIComponent(viewTab)}&from=${encodeURIComponent(crmsMappingBasePath)}`}
+                  className="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+                >
+                  매핑
+                </a>
+              ) : null}
               <button
                 type="button"
                 className={`rounded-md border px-3 py-1.5 text-sm font-semibold ${
@@ -1287,7 +1395,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
           </div>
 
           <div
-            className="h-[62vh] max-h-[720px] min-h-[280px] overflow-auto rounded-lg border border-slate-200"
+            className={autoHeight ? "overflow-auto rounded-lg border border-slate-200" : "h-[62vh] max-h-[720px] min-h-[280px] overflow-auto rounded-lg border border-slate-200"}
             onMouseLeave={() => {
               setHoverPnlSeq(null);
               setHoverColKey(null);
@@ -1869,7 +1977,7 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
                   <option value="SUBTOTAL">소계 계산 행</option>
                   <option value="TOTAL">합계 계산 행</option>
                   <option value="GRAND_TOTAL">총계 계산 행</option>
-                  <option value="PROFIT_CALC">이익 계산 행</option>
+                  <option value="PROFIT_CALC">영업이익 계산 행</option>
                 </select>
               </label>
               {form.row_type === "AMT_CALC" ? (
@@ -1956,50 +2064,72 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
               ) : null}
               {form.row_type === "PROFIT_CALC" ? (
                 <>
-                  <label className="text-[11px] font-medium text-slate-600 sm:col-span-3 lg:col-span-2">
-                    매출(AR) 행 선택
-                    <div className="mt-1 max-h-28 overflow-auto rounded border border-slate-300 p-2">
-                      {profitArRows.map((row) => (
-                        <label key={`ar-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
-                          <input
-                            type="checkbox"
-                            checked={form.profit_ar_targets.includes(row.row_code)}
-                            onChange={(e) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                profit_ar_targets: e.target.checked
-                                  ? [...prev.profit_ar_targets, row.row_code]
-                                  : prev.profit_ar_targets.filter((code) => code !== row.row_code),
-                              }))
-                            }
-                          />
-                          {row.row_label || row.row_code}
-                        </label>
-                      ))}
+                  <div className="sm:col-span-3 lg:col-span-2">
+                    <p className="text-[11px] font-medium text-slate-600 mb-1">합계할 행 선택 <span className="text-[10px] text-slate-400">(AR · 부서운영비 · 현재 섹션)</span></p>
+                    <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
+                      {[
+                        { label: "매출(AR)", rows: profitArRows },
+                        { label: "부서운영비", rows: profitOpRows },
+                        { label: "현재 섹션", rows: rows.filter((r) => !profitArRows.some((ar) => ar.row_code === r.row_code) && !profitOpRows.some((op) => op.row_code === r.row_code)) },
+                      ]
+                        .filter((g) => g.rows.length > 0)
+                        .map((group) => (
+                          <div key={group.label} className="mb-1">
+                            <p className="text-[10px] font-semibold text-slate-500 mb-0.5">{group.label}</p>
+                            {group.rows.map((row) => (
+                              <label key={`add-sum-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={form.profit_ar_targets.includes(row.row_code)}
+                                  onChange={(e) =>
+                                    setForm((prev) => ({
+                                      ...prev,
+                                      profit_ar_targets: e.target.checked
+                                        ? [...prev.profit_ar_targets, row.row_code]
+                                        : prev.profit_ar_targets.filter((code) => code !== row.row_code),
+                                    }))
+                                  }
+                                />
+                                {row.row_label || row.row_code}
+                              </label>
+                            ))}
+                          </div>
+                        ))}
                     </div>
-                  </label>
-                  <label className="text-[11px] font-medium text-slate-600 sm:col-span-3 lg:col-span-2">
-                    매입(AP) 행 선택
-                    <div className="mt-1 max-h-28 overflow-auto rounded border border-slate-300 p-2">
-                      {profitApRows.map((row) => (
-                        <label key={`ap-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
-                          <input
-                            type="checkbox"
-                            checked={form.profit_ap_targets.includes(row.row_code)}
-                            onChange={(e) =>
-                              setForm((prev) => ({
-                                ...prev,
-                                profit_ap_targets: e.target.checked
-                                  ? [...prev.profit_ap_targets, row.row_code]
-                                  : prev.profit_ap_targets.filter((code) => code !== row.row_code),
-                              }))
-                            }
-                          />
-                          {row.row_label || row.row_code}
-                        </label>
-                      ))}
+                  </div>
+                  <div className="sm:col-span-3 lg:col-span-2">
+                    <p className="text-[11px] font-medium text-slate-600 mb-1">차감할 행 선택 <span className="text-[10px] text-slate-400">(AP · 부서운영비 · 현재 섹션)</span></p>
+                    <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
+                      {[
+                        { label: "매입(AP)", rows: profitApRows },
+                        { label: "부서운영비", rows: profitOpRows },
+                        { label: "현재 섹션", rows: rows.filter((r) => !profitApRows.some((ap) => ap.row_code === r.row_code) && !profitOpRows.some((op) => op.row_code === r.row_code)) },
+                      ]
+                        .filter((g) => g.rows.length > 0)
+                        .map((group) => (
+                          <div key={group.label} className="mb-1">
+                            <p className="text-[10px] font-semibold text-slate-500 mb-0.5">{group.label}</p>
+                            {group.rows.map((row) => (
+                              <label key={`add-sub-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={form.profit_ap_targets.includes(row.row_code)}
+                                  onChange={(e) =>
+                                    setForm((prev) => ({
+                                      ...prev,
+                                      profit_ap_targets: e.target.checked
+                                        ? [...prev.profit_ap_targets, row.row_code]
+                                        : prev.profit_ap_targets.filter((code) => code !== row.row_code),
+                                    }))
+                                  }
+                                />
+                                {row.row_label || row.row_code}
+                              </label>
+                            ))}
+                          </div>
+                        ))}
                     </div>
-                  </label>
+                  </div>
                 </>
               ) : null}
             </div>
@@ -2227,50 +2357,72 @@ export default function PnlGridClient({ initialYear }: { initialYear: number }) 
               ) : null}
               {editForm.row_type === "PROFIT_CALC" ? (
                 <>
-                  <label className="text-[11px] font-medium text-slate-600 sm:col-span-3 lg:col-span-2">
-                    매출(AR) 행 선택
-                    <div className="mt-1 max-h-28 overflow-auto rounded border border-slate-300 p-2">
-                      {profitArRows.map((row) => (
-                        <label key={`edit-ar-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
-                          <input
-                            type="checkbox"
-                            checked={editForm.profit_ar_targets.includes(row.row_code)}
-                            onChange={(e) =>
-                              setEditForm((prev) => ({
-                                ...prev,
-                                profit_ar_targets: e.target.checked
-                                  ? [...prev.profit_ar_targets, row.row_code]
-                                  : prev.profit_ar_targets.filter((code) => code !== row.row_code),
-                              }))
-                            }
-                          />
-                          {row.row_label || row.row_code}
-                        </label>
-                      ))}
+                  <div className="sm:col-span-3 lg:col-span-2">
+                    <p className="text-[11px] font-medium text-slate-600 mb-1">합계할 행 선택 <span className="text-[10px] text-slate-400">(AR · 부서운영비 · 현재 섹션)</span></p>
+                    <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
+                      {[
+                        { label: "매출(AR)", rows: profitArRows },
+                        { label: "부서운영비", rows: profitOpRows },
+                        { label: "현재 섹션", rows: rows.filter((r) => !profitArRows.some((ar) => ar.row_code === r.row_code) && !profitOpRows.some((op) => op.row_code === r.row_code)) },
+                      ]
+                        .filter((g) => g.rows.length > 0)
+                        .map((group) => (
+                          <div key={group.label} className="mb-1">
+                            <p className="text-[10px] font-semibold text-slate-500 mb-0.5">{group.label}</p>
+                            {group.rows.map((row) => (
+                              <label key={`edit-sum-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={editForm.profit_ar_targets.includes(row.row_code)}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({
+                                      ...prev,
+                                      profit_ar_targets: e.target.checked
+                                        ? [...prev.profit_ar_targets, row.row_code]
+                                        : prev.profit_ar_targets.filter((code) => code !== row.row_code),
+                                    }))
+                                  }
+                                />
+                                {row.row_label || row.row_code}
+                              </label>
+                            ))}
+                          </div>
+                        ))}
                     </div>
-                  </label>
-                  <label className="text-[11px] font-medium text-slate-600 sm:col-span-3 lg:col-span-2">
-                    매입(AP) 행 선택
-                    <div className="mt-1 max-h-28 overflow-auto rounded border border-slate-300 p-2">
-                      {profitApRows.map((row) => (
-                        <label key={`edit-ap-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
-                          <input
-                            type="checkbox"
-                            checked={editForm.profit_ap_targets.includes(row.row_code)}
-                            onChange={(e) =>
-                              setEditForm((prev) => ({
-                                ...prev,
-                                profit_ap_targets: e.target.checked
-                                  ? [...prev.profit_ap_targets, row.row_code]
-                                  : prev.profit_ap_targets.filter((code) => code !== row.row_code),
-                              }))
-                            }
-                          />
-                          {row.row_label || row.row_code}
-                        </label>
-                      ))}
+                  </div>
+                  <div className="sm:col-span-3 lg:col-span-2">
+                    <p className="text-[11px] font-medium text-slate-600 mb-1">차감할 행 선택 <span className="text-[10px] text-slate-400">(AP · 부서운영비 · 현재 섹션)</span></p>
+                    <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
+                      {[
+                        { label: "매입(AP)", rows: profitApRows },
+                        { label: "부서운영비", rows: profitOpRows },
+                        { label: "현재 섹션", rows: rows.filter((r) => !profitApRows.some((ap) => ap.row_code === r.row_code) && !profitOpRows.some((op) => op.row_code === r.row_code)) },
+                      ]
+                        .filter((g) => g.rows.length > 0)
+                        .map((group) => (
+                          <div key={group.label} className="mb-1">
+                            <p className="text-[10px] font-semibold text-slate-500 mb-0.5">{group.label}</p>
+                            {group.rows.map((row) => (
+                              <label key={`edit-sub-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
+                                <input
+                                  type="checkbox"
+                                  checked={editForm.profit_ap_targets.includes(row.row_code)}
+                                  onChange={(e) =>
+                                    setEditForm((prev) => ({
+                                      ...prev,
+                                      profit_ap_targets: e.target.checked
+                                        ? [...prev.profit_ap_targets, row.row_code]
+                                        : prev.profit_ap_targets.filter((code) => code !== row.row_code),
+                                    }))
+                                  }
+                                />
+                                {row.row_label || row.row_code}
+                              </label>
+                            ))}
+                          </div>
+                        ))}
                     </div>
-                  </label>
+                  </div>
                 </>
               ) : null}
             </div>

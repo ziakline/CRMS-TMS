@@ -3,9 +3,9 @@ import { getServerSession } from "next-auth";
 import { redirect } from "next/navigation";
 import { authOptions } from "../../../../../lib/auth-options";
 import Sidebar from "../../../_components/sidebar";
-import CrmsMappingClient from "../crms-mapping-client";
+import CrmsMappingClient from "../../pnl-plan/crms-mapping-client";
 
-export default async function PnlCrmsMappingPage() {
+export default async function PnlCrmsMappingR2Page() {
   const session = await getServerSession(authOptions);
   if (!session?.user?.email) redirect("/login");
 

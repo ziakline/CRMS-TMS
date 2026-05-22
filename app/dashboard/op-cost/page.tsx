@@ -85,12 +85,48 @@ export default async function OpCostPage({ searchParams }: OpCostPageProps) {
   );
 
   const renderAmountCell = (month: string, field: string, amount: number) => {
-    const prev = prevMap.get(`${month}|${field}`);
+    const prevRaw = prevMap.get(`${month}|${field}`);
+    const prevNum = prevRaw != null ? Number(prevRaw) : NaN;
+    const hasPrev = prevRaw != null && Number.isFinite(prevNum);
+    const diff = hasPrev ? amount - prevNum : null;
+    const trend =
+      diff === null || diff === 0 ? ("flat" as const) : diff > 0 ? ("up" as const) : ("down" as const);
+
     return (
       <div className="text-right">
         <p className="font-semibold text-slate-900">{formatWon(amount)}</p>
-        {prev ? (
-          <p className="mt-1 text-[11px] text-slate-500">(직전 금액: {formatWon(Number(prev))})</p>
+        {hasPrev ? (
+          <div className="mt-1 space-y-0.5 text-right text-[11px] leading-tight">
+            <p className="flex items-center justify-end gap-1 whitespace-nowrap text-slate-500">
+              {trend === "up" ? (
+                <span
+                  className="inline-flex shrink-0 items-center font-bold text-red-600"
+                  title="직전 금액 대비 증가"
+                  aria-label="직전 금액 대비 증가"
+                >
+                  ▲
+                </span>
+              ) : null}
+              {trend === "down" ? (
+                <span
+                  className="inline-flex shrink-0 items-center font-bold text-blue-600"
+                  title="직전 금액 대비 감소"
+                  aria-label="직전 금액 대비 감소"
+                >
+                  ▼
+                </span>
+              ) : null}
+              <span>(직전 금액: {formatWon(prevNum)})</span>
+            </p>
+            {diff !== null && diff !== 0 ? (
+              <p
+                className={`whitespace-nowrap font-semibold tabular-nums ${diff > 0 ? "text-red-600" : "text-blue-600"}`}
+              >
+                {diff > 0 ? "+" : ""}
+                {diff.toLocaleString("ko-KR")}원
+              </p>
+            ) : null}
+          </div>
         ) : null}
       </div>
     );

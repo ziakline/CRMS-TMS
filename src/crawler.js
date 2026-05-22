@@ -802,6 +802,14 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
       .filter((item) => item.source_id)
       .map((item) => [`${item.project_cd}|${item.source_id}|${toDateKey(item.issue_dt)}`, item]),
   );
+  // source_id-only 폴백: issue_dt가 바뀐 경우 중복 생성 방지
+  const arSourceIdMap = new Map();
+  for (const item of existingAr) {
+    if (!item.source_id) continue;
+    const k = `${item.project_cd}|${item.source_id}`;
+    const prev = arSourceIdMap.get(k);
+    if (!prev || item.ar_seq > prev.ar_seq) arSourceIdMap.set(k, item);
+  }
 
   const apMap = new Map();
   for (const item of existingAp) {
@@ -814,6 +822,13 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
       .filter((item) => item.source_id)
       .map((item) => [`${item.project_cd}|${item.source_id}|${toDateKey(item.issue_dt)}`, item]),
   );
+  const apSourceIdMap = new Map();
+  for (const item of existingAp) {
+    if (!item.source_id) continue;
+    const k = `${item.project_cd}|${item.source_id}`;
+    const prev = apSourceIdMap.get(k);
+    if (!prev || item.ap_seq > prev.ap_seq) apSourceIdMap.set(k, item);
+  }
 
   async function writeChangeLog(moduleType, sourceId, issueDt, targetDesc, column, beforeValue, afterValue) {
     if (String(beforeValue ?? "") === String(afterValue ?? "")) return;
@@ -834,9 +849,18 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
 
   for (const incoming of arItems) {
     let matched = null;
+    let oldDateRecord = null; // issue_dt가 변경된 구레코드
     if (incoming.source_id) {
       matched =
         arSourceMap.get(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`) || null;
+      if (!matched) {
+        // issue_dt가 바뀐 경우: source_id-only 폴백으로 기존 레코드 찾기
+        const prev = arSourceIdMap.get(`${incoming.project_cd}|${incoming.source_id}`);
+        if (prev) {
+          matched = prev;
+          oldDateRecord = prev; // 날짜 변경이 있었음을 기록
+        }
+      }
     }
     if (!matched) {
       const key = buildMatchKey(incoming);
@@ -853,9 +877,15 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
       const created = await prisma.ar.create({ data: incoming });
       if (created.source_id) {
         arSourceMap.set(`${created.project_cd}|${created.source_id}|${toDateKey(created.issue_dt)}`, created);
+        arSourceIdMap.set(`${created.project_cd}|${created.source_id}`, created);
       }
       arCount++;
       continue;
+    }
+
+    // issue_dt 변경으로 폴백 매칭된 경우: 구키 제거, 신키 등록
+    if (oldDateRecord && toDateKey(oldDateRecord.issue_dt) !== toDateKey(incoming.issue_dt)) {
+      arSourceMap.delete(`${oldDateRecord.project_cd}|${oldDateRecord.source_id}|${toDateKey(oldDateRecord.issue_dt)}`);
     }
 
     await writeChangeLog("AR", incoming.source_id, incoming.issue_dt, incoming.description, "amount", matched.amount, incoming.amount);
@@ -871,19 +901,26 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
 
     await prisma.ar.update({ where: { ar_seq: matched.ar_seq }, data: incoming });
     if (incoming.source_id) {
-      arSourceMap.set(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`, {
-        ...matched,
-        ...incoming,
-      });
+      const updated = { ...matched, ...incoming };
+      arSourceMap.set(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`, updated);
+      arSourceIdMap.set(`${incoming.project_cd}|${incoming.source_id}`, updated);
     }
     arCount++;
   }
 
   for (const incoming of apItems) {
     let matched = null;
+    let oldDateRecord = null;
     if (incoming.source_id) {
       matched =
         apSourceMap.get(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`) || null;
+      if (!matched) {
+        const prev = apSourceIdMap.get(`${incoming.project_cd}|${incoming.source_id}`);
+        if (prev) {
+          matched = prev;
+          oldDateRecord = prev;
+        }
+      }
     }
     if (!matched) {
       const key = buildMatchKey(incoming);
@@ -896,10 +933,15 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
         ) || null;
     }
 
+    if (oldDateRecord && toDateKey(oldDateRecord.issue_dt) !== toDateKey(incoming.issue_dt)) {
+      apSourceMap.delete(`${oldDateRecord.project_cd}|${oldDateRecord.source_id}|${toDateKey(oldDateRecord.issue_dt)}`);
+    }
+
     if (!matched) {
       const created = await prisma.ap.create({ data: incoming });
       if (created.source_id) {
         apSourceMap.set(`${created.project_cd}|${created.source_id}|${toDateKey(created.issue_dt)}`, created);
+        apSourceIdMap.set(`${created.project_cd}|${created.source_id}`, created);
       }
       apCount++;
       continue;
@@ -917,13 +959,65 @@ async function syncProjectData(targetProjectCd, targetProjectName, extractedData
 
     await prisma.ap.update({ where: { ap_seq: matched.ap_seq }, data: incoming });
     if (incoming.source_id) {
-      apSourceMap.set(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`, {
-        ...matched,
-        ...incoming,
-      });
+      const updated = { ...matched, ...incoming };
+      apSourceMap.set(`${incoming.project_cd}|${incoming.source_id}|${toDateKey(incoming.issue_dt)}`, updated);
+      apSourceIdMap.set(`${incoming.project_cd}|${incoming.source_id}`, updated);
     }
     apCount++;
   }
+
+  // ── CRMS에서 삭제된 항목 감지 & 소프트 삭제 ──────────────────────────────
+  // source_id 있는 항목: source_id 기준으로 비교
+  // source_id 없는 항목(수동등록 포함): buildMatchKey 기준으로 비교
+  const incomingArSourceIds = new Set(arItems.filter((i) => i.source_id).map((i) => i.source_id));
+  const incomingArKeys = new Set(arItems.map(buildMatchKey));
+
+  const arToSoftDelete = [];
+  for (const existing of existingAr) {
+    if (existing.is_deleted === "Y") continue;
+    if (existing.source_id) {
+      if (!incomingArSourceIds.has(existing.source_id)) {
+        arToSoftDelete.push(existing.ar_seq);
+      }
+    } else {
+      // source_id 없는 항목: buildMatchKey로 비교 (description+client+itemType+bizGroup+date)
+      if (!incomingArKeys.has(buildMatchKey(existing))) {
+        arToSoftDelete.push(existing.ar_seq);
+      }
+    }
+  }
+  if (arToSoftDelete.length > 0) {
+    await prisma.ar.updateMany({
+      where: { ar_seq: { in: arToSoftDelete } },
+      data: { is_deleted: "Y" },
+    });
+    console.log(`🗑️ AR 소프트 삭제 (CRMS 제거 항목): ${arToSoftDelete.length}건`);
+  }
+
+  const incomingApSourceIds = new Set(apItems.filter((i) => i.source_id).map((i) => i.source_id));
+  const incomingApKeys = new Set(apItems.map(buildMatchKey));
+
+  const apToSoftDelete = [];
+  for (const existing of existingAp) {
+    if (existing.is_deleted === "Y") continue;
+    if (existing.source_id) {
+      if (!incomingApSourceIds.has(existing.source_id)) {
+        apToSoftDelete.push(existing.ap_seq);
+      }
+    } else {
+      if (!incomingApKeys.has(buildMatchKey(existing))) {
+        apToSoftDelete.push(existing.ap_seq);
+      }
+    }
+  }
+  if (apToSoftDelete.length > 0) {
+    await prisma.ap.updateMany({
+      where: { ap_seq: { in: apToSoftDelete } },
+      data: { is_deleted: "Y" },
+    });
+    console.log(`🗑️ AP 소프트 삭제 (CRMS 제거 항목): ${apToSoftDelete.length}건`);
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   const historyKeySet = new Set(
     existingHistories.map(

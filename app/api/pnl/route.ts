@@ -24,6 +24,18 @@ const TRACKED_CELL_HISTORY_KEYS: string[] = [
   "prev_year_actual",
 ];
 
+const MONTH_VALUE_KEYS = TRACKED_CELL_HISTORY_KEYS.filter((k) => k.startsWith("t_m") || k.startsWith("a_m"));
+
+/** 요청에 포함된 월별·분석 셀만 갱신 (미포함 시 DB 값 유지) */
+function monthAndAnalysisPatch(item: Record<string, unknown>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const key of MONTH_VALUE_KEYS) {
+    if (key in item) out[key] = toNumber(item[key]);
+  }
+  if ("prev_year_actual" in item) out.prev_year_actual = toNumber(item.prev_year_actual);
+  return out;
+}
+
 function numFromDbCell(value: unknown): number {
   if (value === null || value === undefined) return 0;
   const n = Number(value as string | number);
@@ -324,53 +336,33 @@ export async function PUT(request: Request) {
             }
           : {};
 
+      const updateData: Record<string, unknown> = {
+        grade: (itemObj.grade as string) || null,
+        category1: (itemObj.category1 as string) || null,
+        category2: (itemObj.category2 as string) || null,
+        category3: (itemObj.category3 as string) || null,
+        biz_detail: (itemObj.biz_detail as string) || null,
+        biz_group: (itemObj.biz_group as string) || null,
+        client_name: (itemObj.client_name as string) || null,
+        row_label: (itemObj.row_label as string) || null,
+        row_type: (itemObj.row_type as string) || undefined,
+        formula_targets: (itemObj.formula_targets as string) || null,
+        ref_qty_row_code: (itemObj.ref_qty_row_code as string) || null,
+        ref_unit_price_cd: (itemObj.ref_unit_price_cd as string) || null,
+        promo_apply_actual: Boolean(itemObj.promo_apply_actual),
+        vat_included_price: Boolean(itemObj.vat_included_price),
+        ...monthAndAnalysisPatch(itemObj),
+        ...explicitMonthsPatch(itemObj),
+        ...completionPatch,
+      };
+      // sort_order·company_target·calc_mode는 클라이언트가 보낼 때만 갱신
+      if ("sort_order" in itemObj) updateData.sort_order = toNumber(itemObj.sort_order);
+      if ("company_target" in itemObj) updateData.company_target = toNumber(itemObj.company_target);
+      if ("calc_mode" in itemObj) updateData.calc_mode = (itemObj.calc_mode as string) || "AUTO";
+
       await tx.pnlMaster.update({
         where: { pnl_seq },
-        data: {
-          grade: (itemObj.grade as string) || null,
-          category1: (itemObj.category1 as string) || null,
-          category2: (itemObj.category2 as string) || null,
-          category3: (itemObj.category3 as string) || null,
-          biz_detail: (itemObj.biz_detail as string) || null,
-          biz_group: (itemObj.biz_group as string) || null,
-          client_name: (itemObj.client_name as string) || null,
-          row_label: (itemObj.row_label as string) || null,
-          row_type: (itemObj.row_type as string) || undefined,
-          sort_order: toNumber(itemObj.sort_order),
-          company_target: toNumber(itemObj.company_target),
-          calc_mode: (itemObj.calc_mode as string) || "AUTO",
-          formula_targets: (itemObj.formula_targets as string) || null,
-          ref_qty_row_code: (itemObj.ref_qty_row_code as string) || null,
-          ref_unit_price_cd: (itemObj.ref_unit_price_cd as string) || null,
-          promo_apply_actual: Boolean(itemObj.promo_apply_actual),
-          vat_included_price: Boolean(itemObj.vat_included_price),
-          t_m01: toNumber(itemObj.t_m01),
-          t_m02: toNumber(itemObj.t_m02),
-          t_m03: toNumber(itemObj.t_m03),
-          t_m04: toNumber(itemObj.t_m04),
-          t_m05: toNumber(itemObj.t_m05),
-          t_m06: toNumber(itemObj.t_m06),
-          t_m07: toNumber(itemObj.t_m07),
-          t_m08: toNumber(itemObj.t_m08),
-          t_m09: toNumber(itemObj.t_m09),
-          t_m10: toNumber(itemObj.t_m10),
-          t_m11: toNumber(itemObj.t_m11),
-          t_m12: toNumber(itemObj.t_m12),
-          a_m01: toNumber(itemObj.a_m01),
-          a_m02: toNumber(itemObj.a_m02),
-          a_m03: toNumber(itemObj.a_m03),
-          a_m04: toNumber(itemObj.a_m04),
-          a_m05: toNumber(itemObj.a_m05),
-          a_m06: toNumber(itemObj.a_m06),
-          a_m07: toNumber(itemObj.a_m07),
-          a_m08: toNumber(itemObj.a_m08),
-          a_m09: toNumber(itemObj.a_m09),
-          a_m10: toNumber(itemObj.a_m10),
-          a_m11: toNumber(itemObj.a_m11),
-          a_m12: toNumber(itemObj.a_m12),
-          ...explicitMonthsPatch(itemObj),
-          ...completionPatch,
-        },
+        data: updateData,
       });
     }
   });

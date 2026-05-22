@@ -93,6 +93,7 @@ export async function GET() {
   }
 
   const rows = await prisma.ap.findMany({
+    where: { is_deleted: "N" },
     orderBy: { ap_seq: "asc" },
     select: {
       biz_group_nm: true,
