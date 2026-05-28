@@ -1,4 +1,17 @@
 /** 손익·CRMS 매핑 공통 — 예산/분기 항목 제외 */
+/** 부서운영비 소계 — 실적 탭에서만 월별 실적 수기 조정(전체 합계 맞춤) */
+export function isOpCostSubtotalManualRow(row: {
+  pnl_type?: string | null;
+  row_type?: string | null;
+  row_label?: string | null;
+}): boolean {
+  return (
+    String(row.pnl_type ?? "") === "OP_COST" &&
+    String(row.row_type ?? "") === "SUBTOTAL" &&
+    String(row.row_label ?? "").trim() === "부서운영비_소계"
+  );
+}
+
 export function isBudgetOrQuarter(v: string | null | undefined): boolean {
   const s = String(v ?? "").toUpperCase();
   return /(?:^|[^0-9])(1Q|2Q|3Q|4Q)(?:[^0-9]|$)/.test(s) || s.includes("예산") || s.includes("상반기") || s.includes("하반기");

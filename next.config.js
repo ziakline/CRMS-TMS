@@ -10,6 +10,9 @@ const nextConfig = {
         ...(config.watchOptions ?? {}),
         poll: 1000,
         aggregateTimeout: 300,
+        // IMPORTANT:
+        // - watchpack의 ignored는 "glob 문자열"이 아니라 RegExp로 주는 게 안전합니다.
+        // - Windows에서 "System Volume Information" 폴더가 초기 스캔에서 EINVAL/예외를 유발할 수 있어 제외합니다.
         ignored:
           /([\\/](DumpStack\.log\.tmp|hiberfil\.sys|pagefile\.sys|swapfile\.sys)$)|([\\/]System Volume Information([\\/].*)?$)/,
       };

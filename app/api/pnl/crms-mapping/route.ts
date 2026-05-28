@@ -151,27 +151,47 @@ async function findMappings(pnlSeq: number, targetMonth: number): Promise<MapRow
   }
 }
 
+async function findMappingsByMonths(pnlSeq: number, months: number[]): Promise<MapRow[]> {
+  const normalized = [...new Set(months.filter((m) => m >= 1 && m <= 12))];
+  if (!normalized.length) return [];
+  try {
+    const rows = await prisma.$queryRaw<MapRow[]>(Prisma.sql`
+      SELECT pnl_seq, target_month, crms_module, source_seq
+      FROM "TB_PNL_CRMS_MAPPING"
+      WHERE pnl_seq = ${pnlSeq}
+        AND target_month IN (${Prisma.join(normalized)})
+      ORDER BY target_month ASC, map_seq ASC
+    `);
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
 async function persistMapping(
   pnlSeq: number,
   targetMonth: number,
   selection: Array<{ crms_module: string; source_seq: number }> | null,
 ) {
-  await prisma.$executeRaw(Prisma.sql`
-    DELETE FROM "TB_PNL_CRMS_MAPPING"
-    WHERE pnl_seq = ${pnlSeq}
-      AND target_month = ${targetMonth}
-  `);
+  await prisma.pnlCrmsMapping.deleteMany({
+    where: { pnl_seq: pnlSeq, target_month: targetMonth },
+  });
   if (!selection?.length) return;
   const seen = new Set<string>();
+  const data: Array<{ pnl_seq: number; target_month: number; crms_module: string; source_seq: number }> = [];
   for (const sel of selection) {
     const k = `${sel.crms_module}:${sel.source_seq}`;
     if (seen.has(k)) continue;
     seen.add(k);
-    await prisma.$executeRaw(Prisma.sql`
-      INSERT INTO "TB_PNL_CRMS_MAPPING" (pnl_seq, target_month, crms_module, source_seq)
-      VALUES (${pnlSeq}, ${targetMonth}, ${sel.crms_module}, ${sel.source_seq})
-    `);
+    data.push({
+      pnl_seq: pnlSeq,
+      target_month: targetMonth,
+      crms_module: sel.crms_module,
+      source_seq: sel.source_seq,
+    });
   }
+  if (!data.length) return;
+  await prisma.pnlCrmsMapping.createMany({ data, skipDuplicates: true });
 }
 
 type CrmsCrossRow = {
@@ -508,10 +528,14 @@ async function autoYearFromSelectionOp(pnlSeq: number, selection: CrmsPick[]) {
   let saved = 0;
   let skipped = 0;
   const details: Array<{ month: number; reason: string }> = [];
+  const monthList = Array.from({ length: 12 }, (_, idx) => idx + 1);
+  const existingByMonth = new Set(
+    (await findMappingsByMonths(pnlSeq, monthList)).map((m) => m.target_month),
+  );
 
   for (let month = 1; month <= 12; month++) {
     // 이미 매핑된 달은 스킵
-    const exists = (await findMappings(pnlSeq, month)).length > 0;
+    const exists = existingByMonth.has(month);
     if (exists) {
       skipped++;
       details.push({ month, reason: "이미 매핑 존재" });
@@ -535,12 +559,11 @@ async function autoYearFromSelectionOp(pnlSeq: number, selection: CrmsPick[]) {
   }
 
   // 저장된 전체 매핑 반환
-  const maps: Array<{ target_month: number; crms_module: string; source_seq: number }> = [];
-  for (let m = 1; m <= 12; m++) {
-    for (const p of await findMappings(pnlSeq, m)) {
-      maps.push({ target_month: p.target_month, crms_module: p.crms_module, source_seq: p.source_seq });
-    }
-  }
+  const maps = (await findMappingsByMonths(pnlSeq, monthList)).map((p) => ({
+    target_month: p.target_month,
+    crms_module: p.crms_module,
+    source_seq: p.source_seq,
+  }));
   return { saved, skipped, details, scope_biz_group: [...groups.values()][0]?.project_cd ?? "", mappings: maps };
 }
 
@@ -659,6 +682,10 @@ async function autoYearFromSelection(pnlSeq: number, selection: CrmsPick[]) {
   let saved = 0;
   let skipped = 0;
   const details: Array<{ month: number; reason: string }> = [];
+  const monthList = Array.from({ length: 12 }, (_, idx) => idx + 1);
+  const existingByMonth = new Set(
+    (await findMappingsByMonths(pnlSeq, monthList)).map((m) => m.target_month),
+  );
 
   for (let month = 1; month <= 12; month += 1) {
     const userPicks = selectedByMonth.get(month);
@@ -668,7 +695,7 @@ async function autoYearFromSelection(pnlSeq: number, selection: CrmsPick[]) {
       continue;
     }
 
-    const exists = (await findMappings(pnlSeq, month)).length > 0;
+    const exists = existingByMonth.has(month);
     if (exists) {
       skipped += 1;
       details.push({ month, reason: "이미 매핑 존재" });
@@ -698,17 +725,11 @@ async function autoYearFromSelection(pnlSeq: number, selection: CrmsPick[]) {
     saved += 1;
   }
 
-  const maps: Array<{ target_month: number; crms_module: string; source_seq: number }> = [];
-  for (let m = 1; m <= 12; m += 1) {
-    const part = await findMappings(pnlSeq, m);
-    for (const p of part) {
-      maps.push({
-        target_month: p.target_month,
-        crms_module: p.crms_module,
-        source_seq: p.source_seq,
-      });
-    }
-  }
+  const maps = (await findMappingsByMonths(pnlSeq, monthList)).map((p) => ({
+    target_month: p.target_month,
+    crms_module: p.crms_module,
+    source_seq: p.source_seq,
+  }));
   return { saved, skipped, details, scope_biz_group: scopeBizGroup, mappings: maps };
 }
 
@@ -753,6 +774,11 @@ async function autoMapFromJanuary(pnlSeq: number, fromMonth: number) {
   let saved = 0;
   let skipped = 0;
   const details: Array<{ month: number; reason: string }> = [];
+  const existingByMonth = new Set(
+    (await findMappingsByMonths(pnlSeq, Array.from({ length: 11 }, (_, idx) => idx + 2))).map(
+      (m) => m.target_month,
+    ),
+  );
 
   const arRows =
     janMap.crms_module === "AR"
@@ -772,7 +798,7 @@ async function autoMapFromJanuary(pnlSeq: number, fromMonth: number) {
       : [];
 
   for (let month = 2; month <= 12; month += 1) {
-    const exists = (await findMappings(pnlSeq, month)).length > 0;
+    const exists = existingByMonth.has(month);
     if (exists) {
       skipped += 1;
       details.push({ month, reason: "이미 매핑 존재" });

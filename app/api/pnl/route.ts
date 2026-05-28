@@ -303,10 +303,27 @@ export async function PUT(request: Request) {
   const author = session.user?.name?.trim() || session.user?.email || "unknown";
 
   await prisma.$transaction(async (tx) => {
+    const pnlSeqs: number[] = [
+      ...new Set<number>(
+        updates
+          .map((item: Record<string, unknown>) => toNumber(item?.pnl_seq))
+          .filter((v: number) => v > 0),
+      ),
+    ];
+    const beforeRows = await tx.pnlMaster.findMany({ where: { pnl_seq: { in: pnlSeqs } } });
+    const beforeBySeq = new Map(beforeRows.map((row) => [row.pnl_seq, row]));
+    const historyRows: Array<{
+      pnl_seq: number;
+      cell_key: string;
+      old_value: string;
+      new_value: string;
+      author: string;
+    }> = [];
+
     for (const item of updates) {
       const itemObj = item as Record<string, unknown>;
       const pnl_seq = toNumber(itemObj.pnl_seq);
-      const before = await tx.pnlMaster.findUnique({ where: { pnl_seq } });
+      const before = beforeBySeq.get(pnl_seq);
       if (!before) continue;
 
       for (const key of TRACKED_CELL_HISTORY_KEYS) {
@@ -314,14 +331,12 @@ export async function PUT(request: Request) {
         const oldV = numFromDbCell(before[key as keyof typeof before]);
         const newV = toNumber(itemObj[key]);
         if (oldV !== newV) {
-          await tx.pnlCellHistory.create({
-            data: {
-              pnl_seq,
-              cell_key: key,
-              old_value: String(oldV),
-              new_value: String(newV),
-              author,
-            },
+          historyRows.push({
+            pnl_seq,
+            cell_key: key,
+            old_value: String(oldV),
+            new_value: String(newV),
+            author,
           });
         }
       }
@@ -364,6 +379,10 @@ export async function PUT(request: Request) {
         where: { pnl_seq },
         data: updateData,
       });
+    }
+
+    if (historyRows.length) {
+      await tx.pnlCellHistory.createMany({ data: historyRows });
     }
   });
 

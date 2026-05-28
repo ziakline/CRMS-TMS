@@ -1,3 +1,4 @@
+import { isOpCostSubtotalManualRow } from "./pnl-crms-shared";
 import type { PnlFeeOption } from "./pnl-fee-options";
 
 export const PNL_GOAL_MONTH_KEYS = Array.from({ length: 12 }, (_, i) => `t_m${String(i + 1).padStart(2, "0")}`);
@@ -267,8 +268,19 @@ export function resolvePnlRowsMonths(
       const targetRows = targets.map((code) => byCode.get(code)).filter(Boolean) as PnlResolveRow[];
       if (targetRows.length > 0) {
         const resolvedTargets = targetRows.map((target) => resolve(target));
-        for (const key of [...PNL_GOAL_MONTH_KEYS, ...PNL_ACTUAL_MONTH_KEYS]) {
-          next[key] = resolvedTargets.reduce((sum, target) => sum + toNumber(target[key]), 0);
+        if (isOpCostSubtotalManualRow(row)) {
+          for (const gk of PNL_GOAL_MONTH_KEYS) {
+            next[gk] = resolvedTargets.reduce((sum, target) => sum + toNumber(target[gk]), 0);
+          }
+          for (const ak of PNL_ACTUAL_MONTH_KEYS) {
+            next[ak] = actualExplicit.has(ak)
+              ? toNumber(row[ak])
+              : resolvedTargets.reduce((sum, target) => sum + toNumber(target[ak]), 0);
+          }
+        } else {
+          for (const key of [...PNL_GOAL_MONTH_KEYS, ...PNL_ACTUAL_MONTH_KEYS]) {
+            next[key] = resolvedTargets.reduce((sum, target) => sum + toNumber(target[key]), 0);
+          }
         }
       }
     } else if (

@@ -128,9 +128,14 @@ export default function CrmsMappingClient() {
     if (Number.isFinite(baseYear)) qs.set("year", String(baseYear));
     if (pnlType) qs.set("type", pnlType);
     qs.set("view_tab", viewTab);
+    // R2에서 같이보기 상태를 유지하기 위한 전달값(있을 때만 재전달)
+    const cg = sp.get("compare_goal_actual");
+    if (cg) qs.set("compare_goal_actual", cg);
+    const cc = sp.get("compare_crms");
+    if (cc) qs.set("compare_crms", cc);
     const q = qs.toString();
     return q ? `${fromBase}?${q}` : fromBase;
-  }, [baseYear, pnlType, viewTab, fromBase]);
+  }, [baseYear, pnlType, viewTab, fromBase, sp]);
 
   const loadBulk = useCallback(async () => {
     if (!Number.isFinite(baseYear) || !["AR", "AP", "OP_COST"].includes(pnlType)) {

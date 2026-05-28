@@ -1,10 +1,14 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { isOpCostSubtotalManualRow } from "../../../../lib/pnl-crms-shared";
+import { useSearchParams } from "next/navigation";
 import {
   PnlCellAuditHost,
   type PnlCellAuditHostRef,
   type PnlCellTargetPayload,
+  cellNoteFlagKey,
+  isPnlCellCompleted,
   readCellCompletion,
 } from "../pnl-plan/_components/pnl-cell-audit";
 
@@ -94,6 +98,141 @@ const ANALYSIS_STORAGE_KEY = "pnl-unified-r2-analysis-cols";
 // ── effectiveRows helpers (mirror of pnl-grid-client logic) ──────────────────
 function toNumber(v: unknown) { const n = Number(String(v ?? "").replace(/,/g,"")); return Number.isFinite(n) ? n : 0; }
 function parseActualExplicit(csv: unknown): Set<string> { return new Set(String(csv??"").split(",").map(s=>s.trim()).filter(s=>ACTUAL_KEYS.includes(s))); }
+function explicitCsv(set: Set<string>): string | null { return set.size > 0 ? [...set].sort().join(",") : null; }
+function inputMouseDownSelectAll(e: MouseEvent<HTMLInputElement>) {
+  if (e.currentTarget.disabled) return;
+  if (e.button === 2) { e.preventDefault(); return; }
+  if (document.activeElement === e.currentTarget) e.preventDefault();
+}
+function pnlCellInputId(pnlSeq: number, key: string) { return `${pnlSeq}:${key}`; }
+function fmtWon(n: number) { return Math.round(n).toLocaleString("ko-KR"); }
+
+type PnlMonthInputProps = {
+  pnlSeq: number;
+  cellKey: string;
+  val: number;
+  editable: boolean;
+  focused: boolean;
+  isEstimate: boolean;
+  isActualCol: boolean;
+  cellCompleted: boolean;
+  onCommit: (raw: string) => void;
+  onFocusCell: () => void;
+  onBlurCell: () => void;
+  onTab: (reverse: boolean) => void;
+  onContextMenu: (e: MouseEvent<HTMLDivElement>) => void;
+  registerActiveEditor: (editor: { commit: () => void } | null) => void;
+};
+
+const PnlMonthInput = memo(function PnlMonthInput({
+  pnlSeq,
+  cellKey,
+  val,
+  editable,
+  focused,
+  isEstimate,
+  isActualCol,
+  cellCompleted,
+  onCommit,
+  onFocusCell,
+  onBlurCell,
+  onTab,
+  onContextMenu,
+  registerActiveEditor,
+}: PnlMonthInputProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const draftRef = useRef("");
+  const [draft, setDraft] = useState("");
+  const onCommitRef = useRef(onCommit);
+  onCommitRef.current = onCommit;
+
+  useEffect(() => {
+    if (!focused) return;
+    registerActiveEditor({
+      commit: () => onCommitRef.current(draftRef.current),
+    });
+    return () => registerActiveEditor(null);
+  }, [focused, registerActiveEditor]);
+
+  const displayValue = focused ? draft : (val === 0 ? "" : fmtWon(val));
+  const monthInputCls = [
+    "box-border h-[22px] w-full min-w-[88px] max-w-[88px] border border-transparent bg-transparent px-2 py-0 text-right text-xs tabular-nums outline-none",
+    "focus:border-indigo-400 focus:bg-white",
+    editable ? "cursor-text" : "cursor-default",
+    cellCompleted
+      ? "font-black text-[#0B4BFF] drop-shadow-[0_0_0_rgba(0,0,0,0)] disabled:text-[#0B4BFF]"
+      : isEstimate
+        ? "font-bold text-red-600"
+        : val < 0
+          ? "text-red-600"
+          : "",
+  ].join(" ");
+
+  return (
+    <div
+      onMouseDown={(e) => { if (e.button === 2) e.preventDefault(); }}
+      onContextMenu={onContextMenu}
+      className={`relative p-0 text-right tabular-nums whitespace-nowrap ${editable ? "hover:bg-indigo-50/40" : ""} ${isActualCol ? "bg-rose-50/20" : ""}`}
+    >
+      <input
+        ref={inputRef}
+        type="text"
+        inputMode="numeric"
+        data-pnl-cell={pnlCellInputId(pnlSeq, cellKey)}
+        value={displayValue}
+        disabled={!editable}
+        readOnly={!editable}
+        onMouseDown={editable ? inputMouseDownSelectAll : undefined}
+        onFocus={(e) => {
+          if (!editable) return;
+          const init = val === 0 ? "" : String(Math.trunc(val));
+          draftRef.current = init;
+          setDraft(init);
+          onFocusCell();
+          const el = e.currentTarget;
+          el.select();
+          requestAnimationFrame(() => { if (document.activeElement === el) el.select(); });
+        }}
+        onBlur={(e) => {
+          const rt = e.relatedTarget as HTMLElement | null;
+          if (rt?.dataset?.pnlCell) return;
+          if (focused) {
+            onCommitRef.current(draftRef.current);
+            onBlurCell();
+          }
+        }}
+        onChange={(e) => {
+          if (!focused) return;
+          const digits = e.target.value.replace(/\D/g, "");
+          draftRef.current = digits;
+          setDraft(digits);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Tab" && editable) {
+            e.preventDefault();
+            onTab(e.shiftKey);
+          } else if (e.key === "Enter" && editable) {
+            onCommitRef.current(draftRef.current);
+            onBlurCell();
+            (e.target as HTMLInputElement).blur();
+          } else if (e.key === "Escape") {
+            onBlurCell();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+        className={monthInputCls}
+      />
+    </div>
+  );
+}, (prev, next) =>
+  prev.pnlSeq === next.pnlSeq
+  && prev.cellKey === next.cellKey
+  && prev.val === next.val
+  && prev.editable === next.editable
+  && prev.focused === next.focused
+  && prev.isEstimate === next.isEstimate
+  && prev.isActualCol === next.isActualCol
+  && prev.cellCompleted === next.cellCompleted);
 function parseProfitTargets(ft: string | null | undefined) {
   if (!ft) return { ar:[] as string[], ap:[] as string[] };
   try { const p = JSON.parse(ft) as { ar?:string[]; ap?:string[] }; return { ar:Array.isArray(p?.ar)?p.ar:[], ap:Array.isArray(p?.ap)?p.ap:[] }; }
@@ -153,7 +292,17 @@ function computeEffective(allRows:PnlRow[],feeOptions:FeeOption[],year:number):P
     if(row.row_type==="QTY_INPUT"||row.row_type==="AMT_INPUT"){for(let i=0;i<12;i++)next[ACTUAL_KEYS[i]]=rA(row,ACTUAL_KEYS[i],GOAL_KEYS[i]);}
     const tCodes=(row.formula_targets||"").split(",").map(s=>s.trim()).filter(Boolean);
     const tRows=tCodes.map(c=>byCode.get(c)).filter(Boolean) as PnlRow[];
-    if(row.row_type==="SUBTOTAL"&&tRows.length){const rs=tRows.map(resolve);for(const k of[...GOAL_KEYS,...ACTUAL_KEYS])next[k]=rs.reduce((s,r)=>s+toNumber(r[k]),0);}
+    if(row.row_type==="SUBTOTAL"&&tRows.length){
+      const rs=tRows.map(resolve);
+      if(isOpCostSubtotalManualRow(row)){
+        for(const gk of GOAL_KEYS)next[gk]=rs.reduce((s,r)=>s+toNumber(r[gk]),0);
+        for(const ak of ACTUAL_KEYS){
+          next[ak]=expl.has(ak)?toNumber(row[ak]):rs.reduce((s,r)=>s+toNumber(r[ak]),0);
+        }
+      }else{
+        for(const k of[...GOAL_KEYS,...ACTUAL_KEYS])next[k]=rs.reduce((s,r)=>s+toNumber(r[k]),0);
+      }
+    }
     else if(row.row_type==="TOTAL"&&row.calc_mode==="MANUAL_OVERRIDE"&&isTotalPartialGoal(row,sorted,polMap)&&tRows.length){const rs=tRows.map(resolve);for(let i=0;i<12;i++){next[ACTUAL_KEYS[i]]=rs.reduce((s,r)=>s+toNumber(r[ACTUAL_KEYS[i]]),0);next[GOAL_KEYS[i]]=toNumber(row[GOAL_KEYS[i]]);}}
     else if((row.row_type==="TOTAL"||row.row_type==="GRAND_TOTAL")&&row.calc_mode!=="MANUAL_OVERRIDE"&&tRows.length){const rs=tRows.map(resolve);for(const k of[...GOAL_KEYS,...ACTUAL_KEYS])next[k]=rs.reduce((s,r)=>s+toNumber(r[k]),0);}
     if(row.row_type==="PROFIT_CALC"&&row.calc_mode!=="MANUAL_OVERRIDE"){
@@ -180,8 +329,24 @@ const EDITABLE_TYPES:RowType[]=["QTY_INPUT","AMT_INPUT","AMT_CALC","TOTAL","GRAN
 export default function PnlUnifiedClient({ initialYear }:{ initialYear:number }) {
   const yearOptions=useMemo(()=>{const b=new Date().getFullYear();return Array.from({length:6},(_,i)=>b-2+i);},[]);
 
-  const [year,setYear]               = useState(initialYear);
-  const [viewTab,setViewTab]         = useState<ViewTab>("goal");
+  const sp=useSearchParams();
+  const queryYearRaw=sp.get("year") ?? sp.get("base_year");
+  const queryYear =
+    queryYearRaw != null && queryYearRaw.trim() !== ""
+      ? Number(queryYearRaw)
+      : Number.NaN;
+  const initialYearFromQuery=Number.isFinite(queryYear)?queryYear:initialYear;
+
+  const queryViewTab=sp.get("view_tab");
+  const initialViewTab:ViewTab=queryViewTab==="actual"?"actual":"goal";
+
+  const cg=sp.get("compare_goal_actual");
+  const cc=sp.get("compare_crms");
+  const initialCompareGoalActual = cg==="1" || cg==="true";
+  const initialCompareCrms = cc==="1" || cc==="true";
+
+  const [year,setYear]               = useState(initialYearFromQuery);
+  const [viewTab,setViewTab]         = useState<ViewTab>(initialViewTab);
   const [goalEditMode,setGoalEditMode] = useState(false);
   const [sectionRows,setSectionRows] = useState<Record<DepthType,PnlRow[]>>({AR:[],AP:[],OP_COST:[],PROFIT:[]});
   const [dirty,setDirty]             = useState<Record<number,PnlRow>>({});
@@ -190,8 +355,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
   const [saving,setSaving]           = useState(false);
   const [message,setMessage]         = useState<string|null>(null);
   const [editFocus,setEditFocus]     = useState<{seq:number;key:string}|null>(null);
-  const [editDraft,setEditDraft]     = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const activeMonthEditorRef = useRef<{ commit: () => void } | null>(null);
+  const registerActiveMonthEditor = useCallback((editor: { commit: () => void } | null) => {
+    activeMonthEditorRef.current = editor;
+  }, []);
   const cellAuditRef = useRef<PnlCellAuditHostRef>(null);
   const gridScrollRef = useRef<HTMLDivElement>(null);
 
@@ -219,9 +386,11 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
   const [showCompareModal,setShowCompareModal]       = useState(false);
   const [compareDraftGoalActual,setCompareDraftGoalActual] = useState(false);
   const [compareDraftCrms,setCompareDraftCrms]       = useState(false);
-  const [compareSavedGoalActual,setCompareSavedGoalActual] = useState(false);
-  const [compareSavedCrms,setCompareSavedCrms]       = useState(false);
+  const [compareSavedGoalActual,setCompareSavedGoalActual] = useState(initialCompareGoalActual);
+  const [compareSavedCrms,setCompareSavedCrms]       = useState(initialCompareCrms);
   const [crmsSheetBySec,setCrmsSheetBySec]           = useState<Record<DepthType,Record<number,CrmsSheetRow>>>({AR:{},AP:{},OP_COST:{},PROFIT:{}});
+  const [cellNoteFlags,setCellNoteFlags]             = useState<Record<string,boolean>>({});
+  const [cellHistoryFlags,setCellHistoryFlags]       = useState<Record<string,boolean>>({});
   const comparePaneActive = compareSavedGoalActual || compareSavedCrms;
 
   // 행추가
@@ -275,6 +444,33 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
     setCrmsSheetBySec(out);
   },[year,compareSavedCrms]);
   useEffect(()=>{void loadCrmsSheets();},[loadCrmsSheets]);
+
+  // ── Cell note/history summary flags (for corner indicators) ─────────────────
+  const loadCellFlags = useCallback(async ()=>{
+    try{
+      const types:DepthType[]=["AR","AP","OP_COST","PROFIT"];
+      const responses = await Promise.all(types.map(async(type)=>{
+        const res = await fetch(`/api/pnl/cell?summary=1&base_year=${year}&pnl_type=${type}`);
+        const j = await readJson(res);
+        return {
+          flags: (j.flags && typeof j.flags==="object" && !Array.isArray(j.flags)) ? (j.flags as Record<string,boolean>) : {},
+          historyFlags: (j.historyFlags && typeof j.historyFlags==="object" && !Array.isArray(j.historyFlags)) ? (j.historyFlags as Record<string,boolean>) : {},
+        };
+      }));
+      const nextFlags:Record<string,boolean>={};
+      const nextHistory:Record<string,boolean>={};
+      for(const item of responses){
+        Object.assign(nextFlags,item.flags);
+        Object.assign(nextHistory,item.historyFlags);
+      }
+      setCellNoteFlags(nextFlags);
+      setCellHistoryFlags(nextHistory);
+    }catch{
+      setCellNoteFlags({});
+      setCellHistoryFlags({});
+    }
+  },[year]);
+  useEffect(()=>{void loadCellFlags();},[loadCellFlags]);
 
   // ── Effective rows ───────────────────────────────────────────────────────────
   const allEffective=useMemo(()=>{
@@ -455,25 +651,40 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
 
   // ── Cell edit ────────────────────────────────────────────────────────────────
   const isCellEditable=(row:PnlRow,key:string):boolean=>{
-    if(comparePaneActive)return false;
+    if(comparePaneActive&&!compareSavedGoalActual)return false;
+    if(isOpCostSubtotalManualRow(row)&&ACTUAL_KEYS.includes(key))return true;
     const t=row.row_type as RowType; if(!EDITABLE_TYPES.includes(t))return false;
     if(key.startsWith("t_")){if(!goalEditMode)return false; if(t==="SUBTOTAL")return false;}
     if(["AMT_CALC","SUBTOTAL","TOTAL","GRAND_TOTAL","PROFIT_CALC"].includes(t)&&row.calc_mode!=="MANUAL_OVERRIDE")return false;
     return true;
   };
-  const commitDraft=(row:PnlRow,key:string,raw:string)=>{
+  const commitDraft=useCallback((row:PnlRow,key:string,raw:string)=>{
     const num=Number(raw.replace(/,/g,"")); if(!Number.isFinite(num))return;
-    const base=dirty[row.pnl_seq]??row;
-    setDirty(p=>({...p,[row.pnl_seq]:{...base,[key]:num} as PnlRow}));
+    setDirty((p)=>{
+      const base=(p[row.pnl_seq]??row) as PnlRow;
+      const next={...base,[key]:num} as PnlRow;
+      if(viewTab==="actual"&&ACTUAL_KEYS.includes(key)){
+        const set=parseActualExplicit(base.actual_explicit_months);
+        if(isOpCostSubtotalManualRow(row)){
+          set.add(key);
+          next.calc_mode="MANUAL_OVERRIDE";
+        }else if(row.row_type==="AMT_CALC"&&row.calc_mode==="MANUAL_OVERRIDE"){
+          set.add(key);
+        }else{
+          if(num===0)set.add(key); else set.delete(key);
+        }
+        next.actual_explicit_months=explicitCsv(set);
+      }
+      return {...p,[row.pnl_seq]:next};
+    });
+  },[viewTab]);
+  const focusMonthInput=(pnlSeq:number,key:string)=>{
+    requestAnimationFrame(()=>{
+      const el=document.querySelector(`[data-pnl-cell="${pnlCellInputId(pnlSeq,key)}"]`) as HTMLInputElement|null;
+      el?.focus();
+      el?.select();
+    });
   };
-  const handleCellClick=(row:PnlRow,key:string)=>{
-    if(!isCellEditable(row,key))return;
-    const base=dirty[row.pnl_seq]??row;
-    setEditFocus({seq:row.pnl_seq,key});
-    setEditDraft(toNumber(base[key])===0?"":String(toNumber(base[key])));
-    setTimeout(()=>inputRef.current?.select(),0);
-  };
-  const handleCellBlur=(row:PnlRow,key:string)=>{commitDraft(row,key,editDraft);setEditFocus(null);};
 
   /** Tab / Shift+Tab 시 다음·이전 편집 가능 셀로 이동 */
   const navigateCell=useCallback((currentRow:PnlRow,currentKey:string,reverse:boolean)=>{
@@ -491,28 +702,39 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
     if(cur<0||editables.length===0)return;
     const next=reverse?(cur-1+editables.length)%editables.length:(cur+1)%editables.length;
     const {row:nr,key:nk}=editables[next]!;
-    commitDraft(currentRow,currentKey,editDraft);
-    const base=dirty[nr.pnl_seq]??nr;
+    activeMonthEditorRef.current?.commit();
     setEditFocus({seq:nr.pnl_seq,key:nk});
-    setEditDraft(toNumber(base[nk])===0?"":String(toNumber(base[nk])));
-    setTimeout(()=>inputRef.current?.select(),0);
+    focusMonthInput(nr.pnl_seq,nk);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[effectiveBySec,viewTab,goalEditMode,comparePaneActive,dirty,editDraft]);
+  },[effectiveBySec,viewTab,goalEditMode,comparePaneActive,commitDraft]);
 
-  const fmtWon=(n:number)=>Math.round(n).toLocaleString("ko-KR");
-  const dirtyOrOrig=(row:PnlRow,key:string)=>toNumber((dirty[row.pnl_seq]??row)[key]);
+  const rowBase=(row:PnlRow)=>(dirty[row.pnl_seq]??row) as PnlRow;
+  const dirtyOrOrig=(row:PnlRow,key:string)=>toNumber(rowBase(row)[key]);
 
-  const buildCellAuditPayload=(row:PnlRow,key:string,monthIdx:number):PnlCellTargetPayload=>({
-    pnl_seq:row.pnl_seq, cell_key:key, monthLabel:`${monthIdx+1}월`,
-    cell_completion:readCellCompletion(row as {cell_completion?:unknown}),
-    snap:{
-      category3:row.category3, category2:row.category2,
-      biz_group:row.biz_group, client_name:row.client_name,
-      row_label:row.row_label, biz_detail:row.biz_detail,
-      goalVal:toNumber(row[GOAL_KEYS[monthIdx]]),
-      actualVal:toNumber(row[ACTUAL_KEYS[monthIdx]]),
-    },
-  });
+  const patchRow=useCallback((pnlSeq:number,patch:Partial<PnlRow>)=>{
+    setSectionRows((prev)=>{
+      const next={...prev};
+      for(const sec of Object.keys(next) as DepthType[]){
+        next[sec]=next[sec].map((r)=>(r.pnl_seq===pnlSeq?{...r,...patch} as PnlRow:r));
+      }
+      return next;
+    });
+  },[]);
+
+  const buildCellAuditPayload=(row:PnlRow,key:string,monthIdx:number):PnlCellTargetPayload=>{
+    const base=rowBase(row);
+    return{
+      pnl_seq:row.pnl_seq, cell_key:key, monthLabel:`${monthIdx+1}월`,
+      cell_completion:readCellCompletion(base as { cell_completion?: unknown }),
+      snap:{
+        category3:base.category3, category2:base.category2,
+        biz_group:base.biz_group, client_name:base.client_name,
+        row_label:base.row_label, biz_detail:base.biz_detail,
+        goalVal:toNumber(base[GOAL_KEYS[monthIdx]]),
+        actualVal:toNumber(base[ACTUAL_KEYS[monthIdx]]),
+      },
+    };
+  };
 
   // ── Layout ───────────────────────────────────────────────────────────────────
   const visibleMetaCols=META_COLS.filter(c=>visibleMeta.includes(c.key));
@@ -524,8 +746,8 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
   // ── Render ───────────────────────────────────────────────────────────────────
   return (
     <div className="flex h-full min-w-0 flex-col gap-2">
-      <PnlCellAuditHost ref={cellAuditRef} patchRow={()=>{}} setBanner={setMessage}
-        onCellNotesMutated={()=>{}} mappingSheet={{year,pnlType:"AR"}} />
+      <PnlCellAuditHost ref={cellAuditRef} patchRow={patchRow} setBanner={setMessage}
+        onCellNotesMutated={()=>{void loadCellFlags();}} mappingSheet={{year,pnlType:"AR"}} />
       {/* 공유 컨트롤 바 — 고정 영역 */}
       <div className="flex flex-none flex-wrap items-center gap-2">
         <h1 className="text-xl font-bold text-slate-900 shrink-0">{year}년 손익계획_R2</h1>
@@ -626,17 +848,17 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                     {col.label}
                   </th>
                 ))}
-                {comparePaneActive&&(
-                  <th style={{left:visibleMetaCols.length*metaW,minWidth:compareLabelW,width:compareLabelW}}
-                    className="sticky z-30 bg-slate-100 border-b border-l-2 border-l-slate-400 border-slate-300 px-1 py-1.5 text-center whitespace-nowrap font-semibold text-slate-700 shadow-[2px_0_6px_rgba(15,23,42,0.1)]">
-                    구분
-                  </th>
-                )}
                 {analysisCols.map(col=>(
                   <th key={col.key} className="border-b border-r border-slate-300 px-2 py-1.5 text-right whitespace-nowrap font-semibold min-w-[96px] text-slate-600 bg-slate-50">
                     {col.label}
                   </th>
                 ))}
+                {comparePaneActive&&(
+                  <th style={{minWidth:compareLabelW,width:compareLabelW}}
+                    className="bg-slate-100 border-b border-l-2 border-l-slate-400 border-slate-300 px-1 py-1.5 text-center whitespace-nowrap font-semibold text-slate-700">
+                    구분
+                  </th>
+                )}
                 {MONTH_LABELS.map((m,i)=>(
                   <th key={i} className={`border-b border-slate-300 px-2 py-1.5 text-right whitespace-nowrap font-semibold min-w-[88px] ${compareSavedGoalActual?"text-slate-700":viewTab==="goal"?"text-indigo-700":"text-rose-700"}`}>
                     {comparePaneActive?m:`${m} ${viewTab==="goal"?"목표":"실적"}`}
@@ -659,7 +881,8 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                       <td colSpan={TOTAL_COLS} className={`${section.titleCls} px-3 py-1.5 text-sm font-bold`}>
                         <span className="mr-3">[ {section.label} ]</span>
                         {section.key!=="PROFIT"&&(
-                          <a href={`/dashboard/finance/pnl-plan-r2/crms-mapping?type=${section.key}&base_year=${year}&from=/dashboard/finance/pnl-plan-r2`}
+                          <a
+                            href={`/dashboard/finance/pnl-plan-r2/crms-mapping?type=${section.key}&base_year=${year}&from=/dashboard/finance/pnl-plan-r2&view_tab=${viewTab}&compare_goal_actual=${compareSavedGoalActual?1:0}&compare_crms=${compareSavedCrms?1:0}`}
                             className="mr-2 rounded bg-white/20 px-2 py-0.5 text-xs font-normal hover:bg-white/30">매핑</a>
                         )}
                         <button type="button"
@@ -676,7 +899,8 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
 
                     {secRows.map(row=>{
                       const rs=rowStyle(row);
-                      const isEstimate=String(row.row_label??"").includes("추정")&&(["AMT_INPUT","AMT_CALC","SUBTOTAL","TOTAL","GRAND_TOTAL"] as RowType[]).includes(row.row_type);
+                      const rowLabel=String(row.row_label??"");
+                      const isEstimate=rowLabel.includes("추정")&&!rowLabel.includes("외")&&(["AMT_INPUT","AMT_CALC","SUBTOTAL","TOTAL","GRAND_TOTAL"] as RowType[]).includes(row.row_type);
                       const estimateCls=isEstimate?"font-bold text-red-600":"";
                       const layers=compareLayersForRow(row,section.key);
                       const subCount=layers.length;
@@ -697,14 +921,6 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                                     {String(row[col.key]??"")}
                                   </td>
                                 ))}
-
-                                {/* 구분 col */}
-                                {comparePaneActive&&(
-                                  <td style={{left:visibleMetaCols.length*metaW,minWidth:compareLabelW,width:compareLabelW}}
-                                    className={`sticky z-10 border-r border-l-2 border-l-slate-400 border-slate-200 px-0.5 py-0.5 text-center text-[10px] shadow-[2px_0_6px_rgba(15,23,42,0.1)] ${rs||"bg-white"} ${layer.kind==="crms"?"font-bold text-sky-700":"font-semibold text-slate-700"}`}>
-                                    {layer.label}
-                                  </td>
-                                )}
 
                                 {/* 분석 열 — 첫 레이어에서만 rowSpan, 월 열 앞 */}
                                 {isFirst&&analysisCols.map(col=>{
@@ -737,16 +953,43 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                                   );
                                 })}
 
+                                {/* 구분 col — 1월 좌측 */}
+                                {comparePaneActive&&(
+                                  <td style={{minWidth:compareLabelW,width:compareLabelW}}
+                                    className={`border-r border-l-2 border-l-slate-400 border-slate-200 px-0.5 py-0.5 text-center text-[10px] ${rs||"bg-white"} ${layer.kind==="crms"?"font-bold text-sky-700":"font-semibold text-slate-700"}`}>
+                                    {layer.label}
+                                  </td>
+                                )}
+
                                 {/* Month cells */}
                                 {Array.from({length:12},(_,mi)=>{
                                   const monthNum=mi+1;
-                                  const isEditing=!comparePaneActive&&editFocus?.seq===row.pnl_seq;
 
                                   if(layer.kind==="crms"){
                                     const cx=crmsSheetBySec[section.key][row.pnl_seq]?.months[String(monthNum)]??null;
+                                    const hasActualCompareLayer=layers.some((l)=>l.kind==="actual")
+                                      ||(viewTab==="actual"&&layers.some((l)=>l.kind==="crms"));
+                                    const actualForCrms=hasActualCompareLayer&&compareSavedCrms
+                                      ? dirtyOrOrig(row,ACTUAL_KEYS[mi])
+                                      : null;
+                                    const crmsMismatch=Boolean(
+                                      compareSavedCrms
+                                      &&cx
+                                      &&actualForCrms!=null
+                                      &&Math.round(actualForCrms)!==Math.round(toNumber(cx.amount)),
+                                    );
                                     return (
                                       <td key={mi} className="px-2 py-0.5 text-right tabular-nums whitespace-nowrap bg-sky-50/50 font-bold">
-                                        {cx?<span className="font-bold text-slate-900" title={[cx.col_detail,cx.col_category,cx.col_code,cx.col_client,cx.col_item].filter(Boolean).join(" · ")||undefined}>{fmtWon(cx.amount)}</span>:<span className="text-slate-400">—</span>}
+                                        {cx?(
+                                          <span
+                                            className={`font-bold tabular-nums ${crmsMismatch?"text-red-800":"text-slate-900"}`}
+                                            title={crmsMismatch
+                                              ? `실적 ${fmtWon(actualForCrms!)} / CRMS ${fmtWon(cx.amount)}`
+                                              :[cx.col_detail,cx.col_category,cx.col_code,cx.col_client,cx.col_item].filter(Boolean).join(" · ")||undefined}
+                                          >
+                                            {fmtWon(cx.amount)}
+                                          </span>
+                                        ):<span className="text-slate-400">—</span>}
                                       </td>
                                     );
                                   }
@@ -754,31 +997,47 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                                   const cellKey=layer.kind==="goal"?GOAL_KEYS[mi]:layer.kind==="actual"?ACTUAL_KEYS[mi]:viewTab==="goal"?GOAL_KEYS[mi]:ACTUAL_KEYS[mi];
                                   const val=dirtyOrOrig(row,cellKey);
                                   const editable=isCellEditable(row,cellKey);
-                                  const isEditingCell=isEditing&&editFocus?.key===cellKey;
+                                  const monthFocused=!comparePaneActive&&editFocus?.seq===row.pnl_seq&&editFocus?.key===cellKey;
                                   const isActualCol=layer.kind==="actual"||(layer.kind==="tab"&&viewTab==="actual");
+                                  const monthCompleted=isPnlCellCompleted(rowBase(row) as { cell_completion?: unknown },cellKey);
+                                  const noteFlagKey=cellNoteFlagKey(row.pnl_seq,cellKey);
+                                  const hasCellNotes=Boolean(cellNoteFlags[noteFlagKey]);
+                                  const hasCellHistory=Boolean(cellHistoryFlags[noteFlagKey]);
                                   return (
-                                    <td key={mi}
-                                      onClick={()=>handleCellClick(row,cellKey)}
-                                      onMouseDown={e=>{if(e.button===2)e.preventDefault();}}
-                                      onContextMenu={e=>{
-                                        if(comparePaneActive)return;
-                                        e.preventDefault();e.stopPropagation();
-                                        cellAuditRef.current?.openContextMenu(e,buildCellAuditPayload(row,cellKey,mi));
-                                      }}
-                                      className={`px-2 py-0.5 text-right tabular-nums whitespace-nowrap ${editable?"cursor-pointer hover:bg-indigo-50":""} ${isActualCol&&compareSavedGoalActual?"bg-rose-50/20":""}`}>
-                                      {isEditingCell?(
-                                        <input ref={inputRef} type="text" value={editDraft}
-                                          onChange={e=>setEditDraft(e.target.value)}
-                                          onBlur={()=>handleCellBlur(row,cellKey)}
-                                          onKeyDown={e=>{
-                                            if(e.key==="Tab"){e.preventDefault();navigateCell(row,cellKey,e.shiftKey);}
-                                            else if(e.key==="Enter"){commitDraft(row,cellKey,editDraft);setEditFocus(null);}
-                                            else if(e.key==="Escape"){setEditFocus(null);}
-                                          }}
-                                          className="w-full rounded border border-indigo-400 bg-white px-1 py-0 text-right text-xs outline-none" autoFocus/>
-                                      ):(
-                                        <span className={isEstimate?"text-red-600 font-bold":val<0?"text-red-600":""}>{val===0?"":fmtWon(val)}</span>
-                                      )}
+                                    <td key={mi} className={`relative p-0 ${Boolean(isActualCol&&compareSavedGoalActual)?"bg-rose-50/20":""}`}>
+                                      {hasCellHistory ? (
+                                        <span
+                                          className="pointer-events-none absolute left-0 top-0 z-[2] border-r-[6px] border-r-transparent border-t-[6px] border-t-emerald-600 drop-shadow-[0_0_1px_rgba(0,0,0,0.35)]"
+                                          title="타임라인 이력 있음"
+                                          aria-hidden
+                                        />
+                                      ) : null}
+                                      {hasCellNotes ? (
+                                        <span
+                                          className="pointer-events-none absolute right-0 top-0 z-[2] border-l-[6px] border-l-transparent border-t-[6px] border-t-red-500 drop-shadow-[0_0_1px_rgba(0,0,0,0.35)]"
+                                          title="비고 있음"
+                                          aria-hidden
+                                        />
+                                      ) : null}
+                                      <PnlMonthInput
+                                        pnlSeq={row.pnl_seq}
+                                        cellKey={cellKey}
+                                        val={val}
+                                        editable={editable}
+                                        focused={monthFocused}
+                                        isEstimate={isEstimate}
+                                        isActualCol={false}
+                                        cellCompleted={monthCompleted}
+                                        onCommit={(raw)=>commitDraft(row,cellKey,raw)}
+                                        onFocusCell={()=>setEditFocus({seq:row.pnl_seq,key:cellKey})}
+                                        onBlurCell={()=>setEditFocus(null)}
+                                        onTab={(reverse)=>navigateCell(row,cellKey,reverse)}
+                                        registerActiveEditor={registerActiveMonthEditor}
+                                        onContextMenu={(e)=>{
+                                          e.preventDefault();e.stopPropagation();
+                                          cellAuditRef.current?.openContextMenu(e,buildCellAuditPayload(row,cellKey,mi));
+                                        }}
+                                      />
                                     </td>
                                   );
                                 })}
@@ -939,7 +1198,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                   <p className="text-[11px] font-medium text-slate-600 mb-1">합계할 행 <span className="text-[10px] text-slate-400">(AR 매출 · AP 추정)</span></p>
                   <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
                     {(()=>{
-                      const apEstimate=effectiveBySec.AP.filter(r=>(r.row_label??"").includes("추정"));
+                      const apEstimate=effectiveBySec.AP.filter(r=>{
+                        const lbl=String(r.row_label??"");
+                        return lbl.includes("추정")&&!lbl.includes("외");
+                      });
                       const groups=[
                         {label:"AR (매출)",rows:effectiveBySec.AR},
                         ...(apEstimate.length>0?[{label:"AP 추정",rows:apEstimate}]:[]),
@@ -951,7 +1213,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                             <label key={`sum-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
                               <input type="checkbox" checked={addForm.profit_ar_targets.includes(row.row_code)}
                                 onChange={e=>setAddForm(p=>({...p,profit_ar_targets:e.target.checked?[...p.profit_ar_targets,row.row_code]:p.profit_ar_targets.filter(c=>c!==row.row_code)}))}/>
-                              <span className={(row.row_label??"").includes("추정")?"text-red-600 font-semibold":""}>{row.row_label??row.row_code}</span>
+                              <span className={(() => {
+                                const lbl=String(row.row_label??"");
+                                return lbl.includes("추정")&&!lbl.includes("외") ? "text-red-600 font-semibold" : "";
+                              })()}>{row.row_label??row.row_code}</span>
                             </label>
                           ))}
                         </div>
@@ -963,7 +1228,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                   <p className="text-[11px] font-medium text-slate-600 mb-1">차감할 행 <span className="text-[10px] text-slate-400">(AP · 부서운영비 · AR 추정항목)</span></p>
                   <div className="max-h-32 overflow-auto rounded border border-slate-300 p-2">
                     {(()=>{
-                      const arEstimate=effectiveBySec.AR.filter(r=>(r.row_label??"").includes("추정"));
+                      const arEstimate=effectiveBySec.AR.filter(r=>{
+                        const lbl=String(r.row_label??"");
+                        return lbl.includes("추정")&&!lbl.includes("외");
+                      });
                       const groups=[
                         {label:"AP (매입)",rows:effectiveBySec.AP},
                         {label:"부서운영비",rows:effectiveBySec.OP_COST},
@@ -977,7 +1245,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                             <label key={`sub-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
                               <input type="checkbox" checked={addForm.profit_ap_targets.includes(row.row_code)}
                                 onChange={e=>setAddForm(p=>({...p,profit_ap_targets:e.target.checked?[...p.profit_ap_targets,row.row_code]:p.profit_ap_targets.filter(c=>c!==row.row_code)}))}/>
-                              <span className={(row.row_label??"").includes("추정")?"text-red-600 font-semibold":""}>{row.row_label??row.row_code}</span>
+                              <span className={(() => {
+                                const lbl=String(row.row_label??"");
+                                return lbl.includes("추정")&&!lbl.includes("외") ? "text-red-600 font-semibold" : "";
+                              })()}>{row.row_label??row.row_code}</span>
                             </label>
                           ))}
                         </div>
@@ -1065,7 +1336,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                   <p className="mb-0.5 text-[11px] font-medium text-slate-600">합계할 행 <span className="text-[10px] text-slate-400">(AR 매출 · AP 추정)</span></p>
                   <div className="max-h-28 overflow-auto rounded border border-slate-300 p-2">
                     {(()=>{
-                      const apEst=effectiveBySec.AP.filter(r=>(r.row_label??"").includes("추정"));
+                      const apEst=effectiveBySec.AP.filter(r=>{
+                        const lbl=String(r.row_label??"");
+                        return lbl.includes("추정")&&!lbl.includes("외");
+                      });
                       return[
                         {label:"AR (매출)",rows:effectiveBySec.AR},
                         ...(apEst.length>0?[{label:"AP 추정",rows:apEst}]:[]),
@@ -1076,7 +1350,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                             <label key={`esum-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
                               <input type="checkbox" checked={editForm.profit_ar_targets.includes(row.row_code)}
                                 onChange={e=>setEditForm(p=>({...p,profit_ar_targets:e.target.checked?[...p.profit_ar_targets,row.row_code]:p.profit_ar_targets.filter(c=>c!==row.row_code)}))}/>
-                              <span className={(row.row_label??"").includes("추정")?"text-red-600 font-semibold":""}>{row.row_label??row.row_code}</span>
+                              <span className={(() => {
+                                const lbl=String(row.row_label??"");
+                                return lbl.includes("추정")&&!lbl.includes("외") ? "text-red-600 font-semibold" : "";
+                              })()}>{row.row_label??row.row_code}</span>
                             </label>
                           ))}
                         </div>
@@ -1088,7 +1365,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                   <p className="mb-0.5 text-[11px] font-medium text-slate-600">차감할 행 <span className="text-[10px] text-slate-400">(AP · 부서운영비 · AR 추정항목)</span></p>
                   <div className="max-h-28 overflow-auto rounded border border-slate-300 p-2">
                     {(()=>{
-                      const arEst=effectiveBySec.AR.filter(r=>(r.row_label??"").includes("추정"));
+                      const arEst=effectiveBySec.AR.filter(r=>{
+                        const lbl=String(r.row_label??"");
+                        return lbl.includes("추정")&&!lbl.includes("외");
+                      });
                       return[
                         {label:"AP (매입)",rows:effectiveBySec.AP},
                         {label:"부서운영비",rows:effectiveBySec.OP_COST},
@@ -1100,7 +1380,10 @@ export default function PnlUnifiedClient({ initialYear }:{ initialYear:number })
                             <label key={`esub-${row.row_code}`} className="mr-3 inline-flex items-center gap-1 text-[11px] font-normal text-slate-700">
                               <input type="checkbox" checked={editForm.profit_ap_targets.includes(row.row_code)}
                                 onChange={e=>setEditForm(p=>({...p,profit_ap_targets:e.target.checked?[...p.profit_ap_targets,row.row_code]:p.profit_ap_targets.filter(c=>c!==row.row_code)}))}/>
-                              <span className={(row.row_label??"").includes("추정")?"text-red-600 font-semibold":""}>{row.row_label??row.row_code}</span>
+                              <span className={(() => {
+                                const lbl=String(row.row_label??"");
+                                return lbl.includes("추정")&&!lbl.includes("외") ? "text-red-600 font-semibold" : "";
+                              })()}>{row.row_label??row.row_code}</span>
                             </label>
                           ))}
                         </div>

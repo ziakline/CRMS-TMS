@@ -328,12 +328,34 @@ export const PnlCellAuditHost = forwardRef<PnlCellAuditHostRef, Props>(function 
       setBanner(typeof json.message === "string" ? json.message : "완료 상태 저장 실패");
       return;
     }
-    const nextMap =
-      json.cell_completion && typeof json.cell_completion === "object" && !Array.isArray(json.cell_completion)
-        ? (json.cell_completion as Record<string, string>)
-        : {};
-    patchRow(t.pnl_seq, { cell_completion: nextMap });
-    setBanner(nextCompleted ? "완료로 표시했습니다." : "완료를 해제했습니다.");
+    const updatedRows = Array.isArray(json.updated_rows)
+      ? (json.updated_rows as Array<{ pnl_seq: number; cell_completion: unknown }>)
+      : [
+          {
+            pnl_seq: t.pnl_seq,
+            cell_completion:
+              json.cell_completion && typeof json.cell_completion === "object" && !Array.isArray(json.cell_completion)
+                ? json.cell_completion
+                : {},
+          },
+        ];
+    for (const u of updatedRows) {
+      const map =
+        u.cell_completion && typeof u.cell_completion === "object" && !Array.isArray(u.cell_completion)
+          ? (u.cell_completion as Record<string, string>)
+          : {};
+      patchRow(u.pnl_seq, { cell_completion: map });
+    }
+    const cascaded = updatedRows.length > 1;
+    setBanner(
+      nextCompleted
+        ? cascaded
+          ? "소계 및 포함 항목을 완료로 표시했습니다."
+          : "완료로 표시했습니다."
+        : cascaded
+          ? "소계 및 포함 항목의 완료를 해제했습니다."
+          : "완료를 해제했습니다.",
+    );
     closeMenu();
   }, [menu, patchRow, setBanner, closeMenu]);
 

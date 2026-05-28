@@ -187,19 +187,98 @@ export async function POST(request: Request) {
     const completed = Boolean(body.completed);
     const row = await prisma.pnlMaster.findUnique({
       where: { pnl_seq: pnlSeq },
-      select: { cell_completion: true },
-    });
-    const cur = parseCellCompletion(row?.cell_completion);
-    if (completed) cur[cellKey] = "COMPLETED";
-    else delete cur[cellKey];
-    await prisma.pnlMaster.update({
-      where: { pnl_seq: pnlSeq },
-      data: {
-        cell_completion:
-          Object.keys(cur).length > 0 ? (cur as Prisma.InputJsonValue) : Prisma.DbNull,
+      select: {
+        cell_completion: true,
+        row_type: true,
+        formula_targets: true,
+        base_year: true,
+        pnl_type: true,
       },
     });
-    return Response.json({ ok: true, cell_completion: cur }, { status: 200 });
+    if (!row) {
+      return Response.json({ message: "행을 찾을 수 없습니다." }, { status: 404 });
+    }
+
+    const applyCompletion = (cur: Record<string, string>) => {
+      if (completed) cur[cellKey] = "COMPLETED";
+      else delete cur[cellKey];
+      return cur;
+    };
+
+    const toDbJson = (cur: Record<string, string>) =>
+      Object.keys(cur).length > 0 ? (cur as Prisma.InputJsonValue) : Prisma.DbNull;
+
+    const updatedRows: Array<{ pnl_seq: number; cell_completion: Record<string, string> }> = [];
+
+    const subCur = applyCompletion(parseCellCompletion(row.cell_completion));
+    updatedRows.push({ pnl_seq: pnlSeq, cell_completion: subCur });
+
+    if (row.row_type === "SUBTOTAL") {
+      const subtotalTargets = String(row.formula_targets ?? "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      if (subtotalTargets.length > 0) {
+        // 소계 하위 + (금액계산행의) 참조 수량행까지 연쇄 완료/해제
+        const scopeRows = await prisma.pnlMaster.findMany({
+          where: {
+            base_year: row.base_year,
+            pnl_type: row.pnl_type,
+          },
+          select: {
+            pnl_seq: true,
+            row_code: true,
+            row_type: true,
+            ref_qty_row_code: true,
+            cell_completion: true,
+          },
+        });
+
+        const byCode = new Map(scopeRows.map((r) => [r.row_code, r]));
+        const targetCodes = new Set(subtotalTargets);
+
+        // 금액계산행(AMT_CALC)은 참조 수량행(ref_qty_row_code)까지 같이 완료 처리
+        const queue = [...targetCodes];
+        while (queue.length > 0) {
+          const code = queue.shift()!;
+          const target = byCode.get(code);
+          if (!target) continue;
+          if (target.row_type === "AMT_CALC" && target.ref_qty_row_code) {
+            const qtyCode = String(target.ref_qty_row_code).trim();
+            if (qtyCode && !targetCodes.has(qtyCode)) {
+              targetCodes.add(qtyCode);
+              queue.push(qtyCode);
+            }
+          }
+        }
+
+        for (const code of targetCodes) {
+          const target = byCode.get(code);
+          if (!target) continue;
+          const nextCur = applyCompletion(parseCellCompletion(target.cell_completion));
+          updatedRows.push({ pnl_seq: target.pnl_seq, cell_completion: nextCur });
+        }
+      }
+    }
+
+    await prisma.$transaction(
+      updatedRows.map((u) =>
+        prisma.pnlMaster.update({
+          where: { pnl_seq: u.pnl_seq },
+          data: { cell_completion: toDbJson(u.cell_completion) },
+        }),
+      ),
+    );
+
+    return Response.json(
+      {
+        ok: true,
+        cell_completion: subCur,
+        updated_rows: updatedRows,
+      },
+      { status: 200 },
+    );
   }
 
   return Response.json({ message: "지원하지 않는 action입니다." }, { status: 400 });
